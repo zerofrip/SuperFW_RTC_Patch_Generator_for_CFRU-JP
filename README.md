@@ -4,6 +4,8 @@ Windows標準のPowerShell 5.1だけで、CFRU-JP適用済み日本語版FireRed
 
 CFRU-JPベースでRTC関数に変更がなければ他のハックROMでも動作します
 
+ROMの再構築ごとに生成が必要です
+
 
 ## 使い方
 
@@ -20,11 +22,34 @@ Pokemon_FireRed.sym
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SuperFW_RTC_Sym_Generator_for_CFRU-JP.ps1 -RomPath 'C:\path\to\Pokemon_FireRed.gba' -Force
 ```
 
-## `.sym`の適応方法
+## `.sym`を`.patch`に適応する方法
 
-SuperFWの公式サイトを参考にしてください
+SuperFWの公式サイトを参考にしてSave patchesとIRQ patches (for In-game menu)も一緒に適応してください
 
 https://superfw.davidgf.net/docs/usermanual/patches/
+
+
+## `.patch`の適応方法
+
+1.  作成した`.patch`ファイルを`/.superfw/patches`にROMファイルと同名で保存
+
+2.  起動後ROMを選択
+
+3.  Patching options画面に移動
+
+4.  PatchingをPatch engineに変更
+
+5.  In-game menuをEnabledに変更
+
+6.  Emulated RTCをEnabledに変更
+
+7.  Loading options画面に移動
+
+8.  RTC timeを変更(IRQ patchesを当てていればIn-game menuから変更できます)
+
+9.  Remember configで設定を保存
+
+10.  ROM information画面に移動してゲームを起動
 
 
 ## 安全性
