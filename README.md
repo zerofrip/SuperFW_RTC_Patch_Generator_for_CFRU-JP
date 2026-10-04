@@ -66,7 +66,9 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SuperFW_RTC_Sym_Genera
 
 - RTCのアドレスは `.sym` のsymmap結果を優先します
 
-- ROM解析と生成はすべてローカルで行い、ネットワーク/APIには接続しません。ROMデータを送信・共有しません
+- ROM解析と生成はすべてローカルで行い、ネットワーク/APIには接続しません
+
+- ROMデータを送信・共有しません
 
 - 成功時にROM、`.sym`、`.patch` のSHA-256とパッチ件数を表示します
 
