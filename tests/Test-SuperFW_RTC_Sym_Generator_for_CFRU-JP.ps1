@@ -28,7 +28,8 @@ function Invoke-GeneratorProcess {
         [string]$EnginePath,
         [string]$GeneratorPath,
         [string]$InputPath,
-        [string]$ManifestPath
+        [string]$ManifestPath,
+        [string]$OutputPath
     )
 
     $quoteArgument = {
@@ -37,6 +38,9 @@ function Invoke-GeneratorProcess {
     }
     $arguments = '-NoProfile -ExecutionPolicy Bypass -File {0} -RomPath {1} -SignatureManifestPath {2}' -f `
         (& $quoteArgument $GeneratorPath), (& $quoteArgument $InputPath), (& $quoteArgument $ManifestPath)
+    if (-not [string]::IsNullOrWhiteSpace($OutputPath)) {
+        $arguments += ' -OutputPath {0}' -f (& $quoteArgument $OutputPath)
+    }
 
     $startInfo = New-Object System.Diagnostics.ProcessStartInfo
     $startInfo.FileName = $EnginePath
@@ -94,7 +98,7 @@ function New-SyntheticRom {
 }
 
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ('superfw-sym-test-' + [guid]::NewGuid().ToString('N'))
-$generatorPath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $PSScriptRoot '..') 'Generate-SuperFWSym.ps1'))
+$generatorPath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $PSScriptRoot '..') 'SuperFW_RTC_Sym_Generator_for_CFRU-JP.ps1'))
 $engineName = if ($env:OS -eq 'Windows_NT') { 'powershell.exe' } else { 'pwsh' }
 $enginePath = (Get-Command $engineName -ErrorAction Stop).Source
 
@@ -140,6 +144,12 @@ try {
     Assert-True ($refusal.ExitCode -ne 0) 'existing output is refused without -Force'
     Assert-True (([System.Text.Encoding]::ASCII.GetString([System.IO.File]::ReadAllBytes($symPath))) -ceq $expectedSym) 'refusal leaves existing output unchanged'
 
+    $customSymPath = Join-Path $tempRoot 'custom-output.sym'
+    $customOutput = Invoke-GeneratorProcess -EnginePath $enginePath -GeneratorPath $generatorPath -InputPath $romPath -ManifestPath $manifestPath -OutputPath $customSymPath
+    Assert-True ($customOutput.ExitCode -eq 0) "custom output generation returned $($customOutput.ExitCode): $($customOutput.StandardError)"
+    Assert-True ([System.IO.File]::Exists($customSymPath)) 'custom output path is honored'
+    Assert-True ([System.IO.File]::Exists($symPath)) 'custom output does not replace the default output'
+
     [System.IO.File]::Delete($symPath)
     New-SyntheticRom -Path $romPath -OmitLastSignature $true
     $missing = Invoke-GeneratorProcess -EnginePath $enginePath -GeneratorPath $generatorPath -InputPath $romPath -ManifestPath $manifestPath
@@ -151,7 +161,8 @@ try {
     Assert-True ($duplicate.ExitCode -ne 0) 'duplicate signature returns nonzero'
     Assert-True (-not [System.IO.File]::Exists($symPath)) 'duplicate signature creates no output'
 
-    foreach ($sourcePath in @($generatorPath, $PSCommandPath)) {
+    $fullFlowPath = [System.IO.Path]::GetFullPath((Join-Path (Join-Path $PSScriptRoot '..') 'SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.ps1'))
+    foreach ($sourcePath in @($generatorPath, $fullFlowPath, $PSCommandPath)) {
         $tokens = $null
         $parseErrors = $null
         [System.Management.Automation.Language.Parser]::ParseFile($sourcePath, [ref]$tokens, [ref]$parseErrors) | Out-Null

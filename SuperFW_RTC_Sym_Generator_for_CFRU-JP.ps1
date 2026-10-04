@@ -5,7 +5,9 @@ param(
 
     [switch]$Force,
 
-    [string]$SignatureManifestPath
+    [string]$SignatureManifestPath,
+
+    [string]$OutputPath
 )
 
 $ErrorActionPreference = 'Stop'
@@ -160,7 +162,12 @@ try {
         $foundOffsets += $offset
     }
 
-    $outputPath = [System.IO.Path]::ChangeExtension($resolvedRomPath, '.sym')
+    if ([string]::IsNullOrWhiteSpace($OutputPath)) {
+        $outputPath = [System.IO.Path]::ChangeExtension($resolvedRomPath, '.sym')
+    }
+    else {
+        $outputPath = [System.IO.Path]::GetFullPath($OutputPath)
+    }
     if (([System.IO.File]::Exists($outputPath) -or [System.IO.Directory]::Exists($outputPath)) -and -not $Force) {
         throw "Output already exists; use -Force to replace it: $outputPath"
     }
