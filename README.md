@@ -24,9 +24,13 @@ Pokemon_FireRed.patch
 
 SuperFWでは、`.patch` を次のどちらかに配置してください。
 
-(1) ROMと同じフォルダーに、拡張子だけを `.patch` にした同じベース名で置く（例: `Pokemon_FireRed.gba` と `Pokemon_FireRed.patch`）
+(1) ROMと同じフォルダーに、拡張子だけを `.patch` にした同じベース名で置く
 
-(2) SDカードの `/.superfw/patches/` に、同じベース名で置く（例: `/.superfw/patches/Pokemon_FireRed.patch`）
+（例: `Pokemon_FireRed.gba` と `Pokemon_FireRed.patch`）
+
+(2) SDカードの `/.superfw/patches/` に、同じベース名で置く
+
+（例: `/.superfw/patches/Pokemon_FireRed.patch`）
 
 - SuperFW側ではROMを選択し、Patching optionsの `Patching` を `Patch engine`、`In-game menu` と `Emulated RTC` を `Enabled` にします
 
