@@ -43,6 +43,60 @@ function Invoke-CapturedProcess {
     return $result
 }
 
+function Find-PythonExecutable {
+    param(
+        [scriptblock]$CommandLookup,
+        [scriptblock]$ProcessInvoker
+    )
+
+    if (-not $CommandLookup) {
+        $CommandLookup = { param($Name) Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue }
+    }
+    if (-not $ProcessInvoker) {
+        $ProcessInvoker = { param($FileName, $Arguments) Invoke-CapturedProcess -FileName $FileName -Arguments $Arguments }
+    }
+
+    foreach ($candidateName in @('py', 'python')) {
+        $candidate = & $CommandLookup $candidateName
+        if (-not $candidate -or -not $candidate.Source) { continue }
+
+        $arguments = @('-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)')
+        if ($candidateName -eq 'py') { $arguments = @('-3') + $arguments }
+        try {
+            $pythonCheck = & $ProcessInvoker $candidate.Source $arguments
+        }
+        catch {
+            continue
+        }
+
+        if ($pythonCheck.ExitCode -eq 0) {
+            $launcherArguments = @()
+            if ($candidateName -eq 'py') { $launcherArguments = @('-3') }
+            return [pscustomobject]@{
+                Path = $candidate.Source
+                Arguments = $launcherArguments
+            }
+        }
+    }
+
+    throw "Python 3.8 or newer is required. Neither the 'py' launcher nor 'python' command could start a compatible interpreter; install Python 3 and enable one of these commands."
+}
+
+function Get-CurrentPowerShellExecutable {
+    $process = [System.Diagnostics.Process]::GetCurrentProcess()
+    try {
+        $path = $process.MainModule.FileName
+    }
+    finally {
+        $process.Dispose()
+    }
+
+    if ([string]::IsNullOrWhiteSpace($path) -or -not [System.IO.File]::Exists($path)) {
+        throw 'Could not resolve the current PowerShell executable.'
+    }
+    return $path
+}
+
 function Publish-StagedFile {
     param(
         [string]$StagedPath,
@@ -85,27 +139,11 @@ try {
         }
     }
 
+    $pythonPath = $null
     $pythonArgs = @()
-    $pythonLauncher = Get-Command 'py' -CommandType Application -ErrorAction SilentlyContinue
-    if ($pythonLauncher) {
-        $pythonCheck = Invoke-CapturedProcess -FileName $pythonLauncher.Source -Arguments @('-3', '-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)')
-        if ($pythonCheck.ExitCode -eq 0) {
-            $pythonPath = $pythonLauncher.Source
-            $pythonArgs = @('-3')
-        }
-    }
-    if (-not $pythonPath) {
-        $pythonLauncher = Get-Command 'python' -CommandType Application -ErrorAction SilentlyContinue
-        if ($pythonLauncher) {
-            $pythonCheck = Invoke-CapturedProcess -FileName $pythonLauncher.Source -Arguments @('-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)')
-            if ($pythonCheck.ExitCode -eq 0) {
-                $pythonPath = $pythonLauncher.Source
-            }
-        }
-    }
-    if (-not $pythonPath) {
-        throw 'Python 3.8 or newer is required. Install Python 3 and enable the py launcher or python command.'
-    }
+    $pythonSelection = Find-PythonExecutable
+    $pythonPath = $pythonSelection.Path
+    $pythonArgs = @($pythonSelection.Arguments)
 
     $guid = [guid]::NewGuid().ToString('N')
     $symStage = Join-Path ([System.IO.Path]::GetDirectoryName($symPath)) ('.' + [System.IO.Path]::GetFileNameWithoutExtension($symPath) + '.' + $guid + '.sym')
@@ -113,7 +151,7 @@ try {
     $tempPaths += $symStage
     $tempPaths += $patchStage
 
-    $powerShellPath = Join-Path $PSHOME 'powershell.exe'
+    $powerShellPath = Get-CurrentPowerShellExecutable
     $symArgs = @(
         '-NoProfile', '-ExecutionPolicy', 'Bypass', '-File',
         (Join-Path $PSScriptRoot 'SuperFW_RTC_Sym_Generator_for_CFRU-JP.ps1'),

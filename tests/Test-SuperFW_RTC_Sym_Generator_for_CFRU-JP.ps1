@@ -169,6 +169,37 @@ try {
         Assert-True ($parseErrors.Count -eq 0) "PowerShell AST parses $sourcePath"
     }
 
+    $fullFlowAst = [System.Management.Automation.Language.Parser]::ParseFile($fullFlowPath, [ref]$tokens, [ref]$parseErrors)
+    $pythonFinder = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-PythonExecutable' }, $true)
+    $powerShellResolver = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-CurrentPowerShellExecutable' }, $true)
+    Invoke-Expression $pythonFinder.Extent.Text
+    Invoke-Expression $powerShellResolver.Extent.Text
+
+    $script:pythonProbeAttempts = @()
+    $mockLookup = { param($Name) [pscustomobject]@{ Source = $Name + '.exe' } }
+    $mockInvoker = {
+        param($FileName, $Arguments)
+        $script:pythonProbeAttempts += $FileName
+        if ($FileName -eq 'py.exe') { throw 'Synthetic Process.Start failure' }
+        [pscustomobject]@{ ExitCode = 0 }
+    }
+    $pythonSelection = Find-PythonExecutable -CommandLookup $mockLookup -ProcessInvoker $mockInvoker
+    Assert-True (($script:pythonProbeAttempts -join ',') -ceq 'py.exe,python.exe') 'failed py launch falls back to python'
+    Assert-True ($pythonSelection.Path -ceq 'python.exe') 'python is selected after py launch failure'
+    Assert-True ($pythonSelection.Arguments.Count -eq 0) 'python is invoked without py launcher arguments'
+
+    $pythonFailure = $null
+    try {
+        Find-PythonExecutable -CommandLookup $mockLookup -ProcessInvoker { throw 'Synthetic Process.Start failure' } | Out-Null
+    }
+    catch {
+        $pythonFailure = $_.Exception.Message
+    }
+    Assert-True ($pythonFailure.Contains("Neither the 'py' launcher nor 'python' command")) 'no launchable Python candidate reports a clear error'
+
+    $currentPowerShellPath = Get-CurrentPowerShellExecutable
+    Assert-True ([System.IO.File]::Exists($currentPowerShellPath)) 'current PowerShell executable resolves to an existing file'
+
     [Console]::WriteLine('All synthetic SuperFW symbol tests passed.')
 }
 finally {
