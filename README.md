@@ -25,7 +25,7 @@ SuperFWでは、`.patch` を次のどちらかに配置してください。
 
 (1) ROMと同じフォルダーに、拡張子だけを `.patch` にした同じベース名で置く
 
-（例: `Pokemon_FireRed.gba` と `Pokemon_FireRed.patch`）
+（例: `/roms/Pokemon_FireRed.gba` と `/roms/Pokemon_FireRed.patch`）
 
 (2) SDカードの `/.superfw/patches/` に、同じベース名で置く
 
