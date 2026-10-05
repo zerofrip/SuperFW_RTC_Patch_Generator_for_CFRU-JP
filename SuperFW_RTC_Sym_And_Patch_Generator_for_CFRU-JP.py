@@ -13,6 +13,9 @@ import tempfile
 PTYPES = ("waitcnt", "irq", "swi1", "save", "layout", "rtc", "symmap")
 MAGIC = b"SUPERFWPATCHV01\x00"
 MAX_ROM_SIZE = 32 * 1024 * 1024
+RTC_GETTIMEDATE_DAY_OFFSET = 0x68
+RTC_GETTIMEDATE_DAY_INSTRUCTION = 0x1C68
+RTC_GETTIMEDATE_MIN_SIZE = RTC_GETTIMEDATE_DAY_OFFSET + 2
 
 
 class GenerationError(Exception):
@@ -98,6 +101,34 @@ def analyze_rom(rom, sym_text, analyzers=None):
     return merge_results(results)
 
 
+def _rtc_day_compatibility_patch(patchset, generator_module):
+    try:
+        target = patchset["targets"]["rtc"]["gettimedate_fn"]
+        address = target["addr"]
+        size = target["size"]
+        if not isinstance(target, dict) or not isinstance(address, str):
+            raise ValueError("invalid target or address")
+        address = int(address, 16)
+        if isinstance(size, bool) or not isinstance(size, int):
+            raise ValueError("invalid target size")
+        if size < RTC_GETTIMEDATE_MIN_SIZE:
+            raise ValueError("target is too small")
+        if address < 0 or address + RTC_GETTIMEDATE_DAY_OFFSET + 1 > 0x1FFFFFF:
+            raise ValueError("address is outside the ROM address range")
+    except (KeyError, TypeError, ValueError) as error:
+        raise GenerationError(
+            "RTC gettimedate target is missing or malformed, or is too small for offset 0x68"
+        ) from error
+
+    try:
+        return generator_module.gen_cpyhalfword(
+            address + RTC_GETTIMEDATE_DAY_OFFSET,
+            RTC_GETTIMEDATE_DAY_INSTRUCTION,
+        )
+    except Exception as error:
+        raise GenerationError("Could not generate RTC day compatibility patch: %s" % error) from error
+
+
 def serialize_patch(patchset, generator_module=None):
     if generator_module is None:
         try:
@@ -111,12 +142,13 @@ def serialize_patch(patchset, generator_module=None):
         waitcnt = game_patch.waitcnt_patches()
         save = game_patch.save_patches()
         irq = game_patch.irq_patches()
-        rtc = game_patch.rtc_patches()
+        rtc = list(game_patch.rtc_patches())
         layout = game_patch.layout_patches()
         save_type = game_patch.save_type
         programs = generator_module.PROGRAMS[:4]
     except Exception as error:
         raise GenerationError("GamePatch failed: %s" % error) from error
+    rtc += _rtc_day_compatibility_patch(patchset, generator_module)
 
     counts = (len(waitcnt), len(save), save_type, len(irq), len(rtc))
     if any(not isinstance(value, int) or value < 0 or value > 255 for value in counts):

@@ -31,7 +31,7 @@ class FakeGamePatch:
         return [0x33445566]
 
     def rtc_patches(self):
-        return [0x44556677]
+        return [0x44556677, 0x44556678, 0x44556679, 0x4455667A]
 
     def layout_patches(self):
         return [0x55667788]
@@ -40,6 +40,10 @@ class FakeGamePatch:
 class FakeGenerator:
     GamePatch = FakeGamePatch
     PROGRAMS = [b"A", b"BC", b"", b"D" * 60]
+
+    @staticmethod
+    def gen_cpyhalfword(addr, halfw):
+        return [(3 << 28) | (1 << 25) | addr, halfw]
 
 
 def result(targets=None):
@@ -133,13 +137,20 @@ class PipelineTests(unittest.TestCase):
             "080000d0 g 00000004 SiiRtcProbe",
             "080000d4 g 00000004 SiiRtcReset",
             "080000d8 g 00000004 SiiRtcGetStatus",
-            "080000dc g 00000004 SiiRtcGetDateTime",
+            "080000dc g 0000006a SiiRtcGetDateTime",
         ])
 
         patch, counts = runner.build_patch(bytes(rom), symbols)
 
         self.assertEqual(len(patch), 800)
-        self.assertEqual(counts["rtc"], 4)
+        self.assertEqual(counts["rtc"], 6)
+        import patchtool.generator
+        rtc_offset = 288 + 4 * (counts["waitcnt"] + counts["save"] + counts["irq"])
+        rtc_words = struct.unpack_from("<6I", patch, rtc_offset)
+        self.assertEqual(rtc_words[-2:], tuple(patchtool.generator.gen_cpyhalfword(0xDC + 0x68, 0x1C68)))
+        self.assertEqual(rtc_words[-2] & 0x1FFFFFF, 0xDC + 0x68)
+        self.assertEqual(rtc_words[-1] & 0xFFFF, 0x1C68)
+        self.assertEqual(rtc_words[-3], patchtool.generator.gen_rtc_opc(0xDC, patchtool.generator.RTC_GETTD_HNDLR)[0])
 
     def test_cli_reports_hashes_and_does_not_publish_after_analysis_failure(self):
         rom = bytearray(0x200)
@@ -149,7 +160,7 @@ class PipelineTests(unittest.TestCase):
             "080000d0 g 00000004 SiiRtcProbe",
             "080000d4 g 00000004 SiiRtcReset",
             "080000d8 g 00000004 SiiRtcGetStatus",
-            "080000dc g 00000004 SiiRtcGetDateTime",
+            "080000dc g 0000006a SiiRtcGetDateTime",
         ])
         with tempfile.TemporaryDirectory() as directory:
             rom_path = Path(directory) / "synthetic.gba"
@@ -166,7 +177,7 @@ class PipelineTests(unittest.TestCase):
             self.assertIn(hashlib.sha256(rom).hexdigest(), stdout.getvalue())
             self.assertIn(hashlib.sha256(sym_text.encode("utf-8")).hexdigest(), stdout.getvalue())
             self.assertIn("PATCH SHA-256:", stdout.getvalue())
-            self.assertIn("waitcnt=0 save=0 save_type=0 irq=0 rtc=4 layout=0", stdout.getvalue())
+            self.assertIn("waitcnt=0 save=0 save_type=0 irq=0 rtc=6 layout=0", stdout.getvalue())
 
             patch_path.unlink()
             sym_path.write_text("", encoding="utf-8")
@@ -181,12 +192,16 @@ class PipelineTests(unittest.TestCase):
 class SerializationTests(unittest.TestCase):
     def test_serialization_matches_800_byte_header_programs_and_payload(self):
         patch, counts = runner.serialize_patch(
-            {"game-code": "BPRJ", "game-version": 1, "targets": {}, "romsize": 0x200},
+            {
+                "game-code": "BPRJ", "game-version": 1,
+                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x1234", "size": 0x80}}},
+                "romsize": 0x200,
+            },
             generator_module=FakeGenerator,
         )
         self.assertEqual(len(patch), 800)
         self.assertEqual(patch[:16], b"SUPERFWPATCHV01\x00")
-        self.assertEqual(struct.unpack_from("<BBBBBxIxxxxxx", patch, 16), (1, 1, 2, 1, 1, 0x55667788))
+        self.assertEqual(struct.unpack_from("<BBBBBxIxxxxxx", patch, 16), (1, 1, 2, 1, 6, 0x55667788))
         offset = 32
         for program in FakeGenerator.PROGRAMS:
             length = struct.unpack_from("<I", patch, offset)[0]
@@ -194,10 +209,25 @@ class SerializationTests(unittest.TestCase):
             self.assertEqual(patch[offset + 4:offset + 4 + length], program)
             self.assertEqual(patch[offset + 4 + length:offset + 64], bytes(60 - length))
             offset += 64
-        words = struct.unpack_from("<4I", patch, 288)
-        self.assertEqual(words, (0x11223344, 0x22334455, 0x33445566, 0x44556677))
-        self.assertEqual(patch[304:], bytes(496))
-        self.assertEqual(counts, {"waitcnt": 1, "save": 1, "save_type": 2, "irq": 1, "rtc": 1, "layout": 1})
+        words = struct.unpack_from("<9I", patch, 288)
+        self.assertEqual(words[:7], (0x11223344, 0x22334455, 0x33445566, 0x44556677, 0x44556678, 0x44556679, 0x4455667A))
+        self.assertEqual(words[7:], ((3 << 28) | (1 << 25) | 0x129C, 0x1C68))
+        self.assertEqual(patch[324:], bytes(476))
+        self.assertEqual(counts, {"waitcnt": 1, "save": 1, "save_type": 2, "irq": 1, "rtc": 6, "layout": 1})
+
+    def test_missing_malformed_or_too_small_gettimedate_target_fails_closed(self):
+        targets = [
+            {},
+            {"rtc": {"gettimedate_fn": {"addr": "not-hex", "size": 0x80}}},
+            {"rtc": {"gettimedate_fn": {"addr": "0x1234", "size": 0x69}}},
+        ]
+        for invalid_targets in targets:
+            with self.subTest(targets=invalid_targets):
+                with self.assertRaisesRegex(runner.GenerationError, "gettimedate target"):
+                    runner.serialize_patch(
+                        {"game-code": "BPRJ", "game-version": 1, "targets": invalid_targets, "romsize": 0x200},
+                        generator_module=FakeGenerator,
+                    )
 
     def test_invalid_generator_payload_fails_closed(self):
         class InvalidGenerator(FakeGenerator):
@@ -205,7 +235,11 @@ class SerializationTests(unittest.TestCase):
 
         with self.assertRaisesRegex(runner.GenerationError, "program table"):
             runner.serialize_patch(
-                {"game-code": "BPRJ", "game-version": 1, "targets": {}, "romsize": 0x200},
+                {
+                    "game-code": "BPRJ", "game-version": 1,
+                    "targets": {"rtc": {"gettimedate_fn": {"addr": "0x1234", "size": 0x80}}},
+                    "romsize": 0x200,
+                },
                 generator_module=InvalidGenerator,
             )
 
