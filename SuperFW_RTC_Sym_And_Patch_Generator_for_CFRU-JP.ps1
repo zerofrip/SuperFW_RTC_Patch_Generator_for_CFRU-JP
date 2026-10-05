@@ -43,29 +43,58 @@ function Invoke-CapturedProcess {
     return $result
 }
 
-function Find-PythonExecutable {
+function Invoke-PowerShellCommand {
     param(
-        [scriptblock]$CommandLookup,
-        [scriptblock]$ProcessInvoker
+        [string]$CommandToken,
+        [string[]]$Arguments
     )
 
-    if (-not $CommandLookup) {
-        $CommandLookup = { param($Name) Get-Command $Name -CommandType Application -ErrorAction SilentlyContinue }
+    $previousErrorActionPreference = $ErrorActionPreference
+    $outputItems = @()
+    $exitCode = 1
+    try {
+        $ErrorActionPreference = 'Continue'
+        $global:LASTEXITCODE = $null
+        $outputItems = @(& $CommandToken @Arguments 2>&1)
+        if ($null -eq $global:LASTEXITCODE) {
+            $exitCode = 0
+        }
+        else {
+            $exitCode = [int]$global:LASTEXITCODE
+        }
     }
-    if (-not $ProcessInvoker) {
-        $ProcessInvoker = { param($FileName, $Arguments) Invoke-CapturedProcess -FileName $FileName -Arguments $Arguments }
+    catch {
+        $outputItems += $_.Exception.Message
+    }
+    finally {
+        $ErrorActionPreference = $previousErrorActionPreference
     }
 
+    $capturedOutput = @($outputItems | ForEach-Object { [string]$_ }) -join [Environment]::NewLine
+    return [pscustomobject]@{
+        ExitCode = $exitCode
+        Output = $capturedOutput
+    }
+}
+
+function Find-PythonExecutable {
+    param(
+        [scriptblock]$CommandInvoker
+    )
+
+    if (-not $CommandInvoker) {
+        $CommandInvoker = { param($CommandToken, $Arguments) Invoke-PowerShellCommand -CommandToken $CommandToken -Arguments $Arguments }
+    }
+
+    $failures = @()
     foreach ($candidateName in @('py', 'python')) {
-        $candidate = & $CommandLookup $candidateName
-        if (-not $candidate -or -not $candidate.Source) { continue }
-
         $arguments = @('-c', 'import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)')
         if ($candidateName -eq 'py') { $arguments = @('-3') + $arguments }
         try {
-            $pythonCheck = & $ProcessInvoker $candidate.Source $arguments
+            $pythonCheck = & $CommandInvoker $candidateName $arguments
         }
         catch {
+            $failures += "$candidateName`: $($_.Exception.Message)"
             continue
         }
 
@@ -73,13 +102,18 @@ function Find-PythonExecutable {
             $launcherArguments = @()
             if ($candidateName -eq 'py') { $launcherArguments = @('-3') }
             return [pscustomobject]@{
-                Path = $candidate.Source
+                CommandToken = $candidateName
                 Arguments = $launcherArguments
             }
         }
+        if (-not [string]::IsNullOrWhiteSpace($pythonCheck.Output)) {
+            $failures += "$candidateName`: $($pythonCheck.Output.Trim())"
+        }
     }
 
-    throw "Python 3.8 or newer is required. Neither the 'py' launcher nor 'python' command could start a compatible interpreter; install Python 3 and enable one of these commands."
+    $diagnostic = "Python 3.8 or newer is required. Neither the 'py' launcher nor 'python' command could start a compatible interpreter; install Python 3 and enable one of these commands."
+    if ($failures.Count -gt 0) { $diagnostic += ' ' + ($failures -join '; ') }
+    throw $diagnostic
 }
 
 function Get-CurrentPowerShellExecutable {
@@ -139,10 +173,10 @@ try {
         }
     }
 
-    $pythonPath = $null
+    $pythonCommand = $null
     $pythonArgs = @()
     $pythonSelection = Find-PythonExecutable
-    $pythonPath = $pythonSelection.Path
+    $pythonCommand = $pythonSelection.CommandToken
     $pythonArgs = @($pythonSelection.Arguments)
 
     $guid = [guid]::NewGuid().ToString('N')
@@ -167,9 +201,9 @@ try {
         (Join-Path $PSScriptRoot 'SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.py'),
         '--rom', $resolvedRomPath, '--sym', $symStage, '--output', $patchStage
     )
-    $runnerResult = Invoke-CapturedProcess -FileName $pythonPath -Arguments $runnerArgs
+    $runnerResult = Invoke-PowerShellCommand -CommandToken $pythonCommand -Arguments $runnerArgs
     if ($runnerResult.ExitCode -ne 0) {
-        if ($runnerResult.StandardError) { [Console]::Error.WriteLine($runnerResult.StandardError.Trim()) }
+        if ($runnerResult.Output) { [Console]::Error.WriteLine($runnerResult.Output.Trim()) }
         throw 'Patch generation failed; existing outputs were not replaced.'
     }
 
@@ -199,7 +233,7 @@ try {
     }
     $backupPaths = @()
 
-    [Console]::WriteLine($runnerResult.StandardOutput.TrimEnd())
+    [Console]::WriteLine($runnerResult.Output.TrimEnd())
     [Console]::WriteLine("SYM: $symPath")
     [Console]::WriteLine("PATCH: $patchPath")
     exit 0

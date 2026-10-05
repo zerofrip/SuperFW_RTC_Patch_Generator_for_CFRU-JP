@@ -172,30 +172,48 @@ try {
     $fullFlowAst = [System.Management.Automation.Language.Parser]::ParseFile($fullFlowPath, [ref]$tokens, [ref]$parseErrors)
     $pythonFinder = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-PythonExecutable' }, $true)
     $powerShellResolver = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-CurrentPowerShellExecutable' }, $true)
+    $powerShellInvoker = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-PowerShellCommand' }, $true)
     Invoke-Expression $pythonFinder.Extent.Text
     Invoke-Expression $powerShellResolver.Extent.Text
+    Invoke-Expression $powerShellInvoker.Extent.Text
 
     $script:pythonProbeAttempts = @()
-    $mockLookup = { param($Name) [pscustomobject]@{ Source = $Name + '.exe' } }
-    $mockInvoker = {
-        param($FileName, $Arguments)
-        $script:pythonProbeAttempts += $FileName
-        if ($FileName -eq 'py.exe') { throw 'Synthetic Process.Start failure' }
-        [pscustomobject]@{ ExitCode = 0 }
+    $mockPowerShellInvoker = {
+        param($CommandToken, $Arguments)
+        $script:pythonProbeAttempts += [pscustomobject]@{ CommandToken = $CommandToken; Arguments = @($Arguments) }
+        if ($CommandToken -eq 'py') { return [pscustomobject]@{ ExitCode = 1; Output = 'Synthetic py failure' } }
+        [pscustomobject]@{ ExitCode = 0; Output = 'Python 3.14.8' }
     }
-    $pythonSelection = Find-PythonExecutable -CommandLookup $mockLookup -ProcessInvoker $mockInvoker
-    Assert-True (($script:pythonProbeAttempts -join ',') -ceq 'py.exe,python.exe') 'failed py launch falls back to python'
-    Assert-True ($pythonSelection.Path -ceq 'python.exe') 'python is selected after py launch failure'
+    $pythonSelection = Find-PythonExecutable -CommandInvoker $mockPowerShellInvoker
+    Assert-True (($script:pythonProbeAttempts.CommandToken -join ',') -ceq 'py,python') 'failed py probe falls back to python'
+    Assert-True ($pythonSelection.CommandToken -ceq 'python') 'PowerShell-invokable python is selected by command token, without resolving a Source path'
     Assert-True ($pythonSelection.Arguments.Count -eq 0) 'python is invoked without py launcher arguments'
+    Assert-True (($script:pythonProbeAttempts[0].Arguments -join ',') -ceq '-3,-c,import sys; raise SystemExit(0 if sys.version_info >= (3, 8) else 1)') 'py probe includes -3'
+
+    $pythonOnlyInvoker = {
+        param($CommandToken, $Arguments)
+        if ($CommandToken -ne 'python') { throw 'Synthetic py command is unavailable' }
+        [pscustomobject]@{ ExitCode = 0; Output = 'Python 3.14.8' }
+    }
+    $pythonOnlySelection = Find-PythonExecutable -CommandInvoker $pythonOnlyInvoker
+    Assert-True ($pythonOnlySelection.CommandToken -ceq 'python') 'mock PowerShell-native invoker selects python even when direct executable launch is unavailable'
 
     $pythonFailure = $null
     try {
-        Find-PythonExecutable -CommandLookup $mockLookup -ProcessInvoker { throw 'Synthetic Process.Start failure' } | Out-Null
+        Find-PythonExecutable -CommandInvoker { param($CommandToken, $Arguments) [pscustomobject]@{ ExitCode = 1; Output = 'Synthetic command failure' } } | Out-Null
     }
     catch {
         $pythonFailure = $_.Exception.Message
     }
-    Assert-True ($pythonFailure.Contains("Neither the 'py' launcher nor 'python' command")) 'no launchable Python candidate reports a clear error'
+    Assert-True ($pythonFailure.Contains("Neither the 'py' launcher nor 'python' command")) 'no compatible Python candidate reports a clear error'
+    Assert-True ($pythonFailure.Contains('Synthetic command failure')) 'Python probe failure output is retained in the diagnostic'
+
+    if ($env:OS -eq 'Windows_NT') {
+        $nativeStderr = Invoke-PowerShellCommand -CommandToken 'cmd.exe' -Arguments @('/c', 'echo native-stderr 1>&2')
+        Assert-True ($nativeStderr.ExitCode -eq 0) 'captured native stderr does not terminate invocation under ErrorActionPreference Stop'
+        Assert-True ($nativeStderr.Output.Contains('native-stderr')) 'native stderr is captured for reporting'
+        Assert-True ($ErrorActionPreference -eq 'Stop') 'native invocation restores ErrorActionPreference'
+    }
 
     $currentPowerShellPath = Get-CurrentPowerShellExecutable
     Assert-True ([System.IO.File]::Exists($currentPowerShellPath)) 'current PowerShell executable resolves to an existing file'
