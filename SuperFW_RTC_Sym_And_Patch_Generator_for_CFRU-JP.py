@@ -15,7 +15,17 @@ MAGIC = b"SUPERFWPATCHV01\x00"
 MAX_ROM_SIZE = 32 * 1024 * 1024
 RTC_GETTIMEDATE_DAY_OFFSET = 0x68
 RTC_GETTIMEDATE_DAY_INSTRUCTION = 0x1C68
-RTC_GETTIMEDATE_MIN_SIZE = RTC_GETTIMEDATE_DAY_OFFSET + 2
+RTC_GETTIMEDATE_HOOK_OFFSET = 0x3A
+RTC_GETTIMEDATE_HOOK_WORD = 0xF831F000
+RTC_GETTIMEDATE_TAIL_OFFSET = 0xA0
+RTC_GETTIMEDATE_TAIL_WORDS = (
+    0x30061C28,  # mov r0,r5; add r0,#6
+    0xDF062107,  # mov r1,#7; swi 6
+    0x224070E1,  # strb r1,[r4,#3]; mov r2,#0x40
+    0x200071E2,  # strb r2,[r4,#7]; mov r0,#0
+    0x477021B4,  # mov r1,#180; bx lr
+)
+RTC_GETTIMEDATE_MIN_SIZE = RTC_GETTIMEDATE_TAIL_OFFSET + len(RTC_GETTIMEDATE_TAIL_WORDS) * 4
 
 
 class GenerationError(Exception):
@@ -101,32 +111,46 @@ def analyze_rom(rom, sym_text, analyzers=None):
     return merge_results(results)
 
 
-def _rtc_day_compatibility_patch(patchset, generator_module):
+def _rtc_compatibility_patch(patchset, generator_module):
     try:
         target = patchset["targets"]["rtc"]["gettimedate_fn"]
+        if not isinstance(target, dict):
+            raise ValueError("invalid target")
         address = target["addr"]
         size = target["size"]
-        if not isinstance(target, dict) or not isinstance(address, str):
+        if not isinstance(address, str):
             raise ValueError("invalid target or address")
         address = int(address, 16)
         if isinstance(size, bool) or not isinstance(size, int):
             raise ValueError("invalid target size")
         if size < RTC_GETTIMEDATE_MIN_SIZE:
             raise ValueError("target is too small")
-        if address < 0 or address + RTC_GETTIMEDATE_DAY_OFFSET + 1 > 0x1FFFFFF:
+        if address < 0 or address + RTC_GETTIMEDATE_MIN_SIZE - 1 > 0x1FFFFFF:
             raise ValueError("address is outside the ROM address range")
     except (KeyError, TypeError, ValueError) as error:
         raise GenerationError(
-            "RTC gettimedate target is missing or malformed, or is too small for offset 0x68"
+            "RTC gettimedate target is missing or malformed, or is too small through offset 0xB3"
         ) from error
 
     try:
-        return generator_module.gen_cpyhalfword(
-            address + RTC_GETTIMEDATE_DAY_OFFSET,
-            RTC_GETTIMEDATE_DAY_INSTRUCTION,
+        # These raw words are intentional: gen_cpywords writes little-endian Thumb
+        # instruction bytes, including the fixed BL encoding used by these builds.
+        return (
+            generator_module.gen_cpyhalfword(
+                address + RTC_GETTIMEDATE_DAY_OFFSET,
+                RTC_GETTIMEDATE_DAY_INSTRUCTION,
+            )
+            + generator_module.gen_cpywords(
+                address + RTC_GETTIMEDATE_HOOK_OFFSET,
+                [RTC_GETTIMEDATE_HOOK_WORD],
+            )
+            + generator_module.gen_cpywords(
+                address + RTC_GETTIMEDATE_TAIL_OFFSET,
+                list(RTC_GETTIMEDATE_TAIL_WORDS),
+            )
         )
     except Exception as error:
-        raise GenerationError("Could not generate RTC day compatibility patch: %s" % error) from error
+        raise GenerationError("Could not generate RTC compatibility patch: %s" % error) from error
 
 
 def serialize_patch(patchset, generator_module=None):
@@ -148,7 +172,7 @@ def serialize_patch(patchset, generator_module=None):
         programs = generator_module.PROGRAMS[:4]
     except Exception as error:
         raise GenerationError("GamePatch failed: %s" % error) from error
-    rtc += _rtc_day_compatibility_patch(patchset, generator_module)
+    rtc += _rtc_compatibility_patch(patchset, generator_module)
 
     counts = (len(waitcnt), len(save), save_type, len(irq), len(rtc))
     if any(not isinstance(value, int) or value < 0 or value > 255 for value in counts):
