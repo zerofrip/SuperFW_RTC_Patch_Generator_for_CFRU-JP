@@ -173,9 +173,42 @@ try {
     $pythonFinder = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Find-PythonExecutable' }, $true)
     $powerShellResolver = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Get-CurrentPowerShellExecutable' }, $true)
     $powerShellInvoker = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Invoke-PowerShellCommand' }, $true)
+    $outputPublisher = $fullFlowAst.Find({ param($node) $node -is [System.Management.Automation.Language.FunctionDefinitionAst] -and $node.Name -eq 'Publish-StagedOutputs' }, $true)
     Invoke-Expression $pythonFinder.Extent.Text
     Invoke-Expression $powerShellResolver.Extent.Text
     Invoke-Expression $powerShellInvoker.Extent.Text
+    Invoke-Expression $outputPublisher.Extent.Text
+
+    $publishRoot = Join-Path $tempRoot 'publish-tests'
+    [System.IO.Directory]::CreateDirectory($publishRoot) | Out-Null
+    $publishSymPath = Join-Path $publishRoot 'overwrite.sym'
+    $publishPatchPath = Join-Path $publishRoot 'overwrite.patch'
+    $publishSymStage = Join-Path $publishRoot 'staged.sym'
+    $publishPatchStage = Join-Path $publishRoot 'staged.patch'
+    [System.IO.File]::WriteAllText($publishSymPath, 'old sym')
+    [System.IO.File]::WriteAllText($publishPatchPath, 'old patch')
+    [System.IO.File]::WriteAllText($publishSymStage, 'new sym')
+    [System.IO.File]::WriteAllText($publishPatchStage, 'new patch')
+    Publish-StagedOutputs -SymStagedPath $publishSymStage -SymOutputPath $publishSymPath -PatchStagedPath $publishPatchStage -PatchOutputPath $publishPatchPath -Guid ([guid]::NewGuid().ToString('N'))
+    Assert-True ([System.IO.File]::ReadAllText($publishSymPath) -ceq 'new sym') 'successful publication overwrites the existing symbol output'
+    Assert-True ([System.IO.File]::ReadAllText($publishPatchPath) -ceq 'new patch') 'successful publication overwrites the existing patch output'
+    Assert-True (@([System.IO.Directory]::GetFiles($publishRoot, '*.bak')).Count -eq 0) 'successful publication removes backups'
+    Assert-True (-not [System.IO.File]::Exists($publishSymStage) -and -not [System.IO.File]::Exists($publishPatchStage)) 'successful publication consumes staged outputs'
+
+    [System.IO.File]::WriteAllText($publishSymPath, 'preserved sym')
+    [System.IO.File]::WriteAllText($publishPatchPath, 'preserved patch')
+    [System.IO.File]::WriteAllText($publishSymStage, 'replacement sym')
+    $publishFailure = $null
+    try {
+        Publish-StagedOutputs -SymStagedPath $publishSymStage -SymOutputPath $publishSymPath -PatchStagedPath $publishPatchStage -PatchOutputPath $publishPatchPath -Guid ([guid]::NewGuid().ToString('N'))
+    }
+    catch {
+        $publishFailure = $_.Exception.Message
+    }
+    Assert-True (-not [string]::IsNullOrWhiteSpace($publishFailure)) 'failed pair publication is reported'
+    Assert-True ([System.IO.File]::ReadAllText($publishSymPath) -ceq 'preserved sym') 'failed publication restores the previous symbol output'
+    Assert-True ([System.IO.File]::ReadAllText($publishPatchPath) -ceq 'preserved patch') 'failed publication preserves the previous patch output'
+    Assert-True (@([System.IO.Directory]::GetFiles($publishRoot, '*.bak')).Count -eq 0) 'rollback restores outputs without backup leftovers'
 
     $script:pythonProbeAttempts = @()
     $mockPowerShellInvoker = {

@@ -131,28 +131,68 @@ function Get-CurrentPowerShellExecutable {
     return $path
 }
 
-function Publish-StagedFile {
+function Publish-StagedOutputs {
     param(
-        [string]$StagedPath,
-        [string]$OutputPath,
-        [switch]$Force
+        [string]$SymStagedPath,
+        [string]$SymOutputPath,
+        [string]$PatchStagedPath,
+        [string]$PatchOutputPath,
+        [string]$Guid
     )
 
-    if ([System.IO.File]::Exists($OutputPath)) {
-        if (-not $Force) {
-            throw "Output appeared during generation; refusing to overwrite: $OutputPath"
+    $backupPaths = @()
+    $publishedPaths = @()
+    try {
+        foreach ($outputPath in @($SymOutputPath, $PatchOutputPath)) {
+            if ([System.IO.File]::Exists($outputPath)) {
+                $backupPath = $outputPath + '.' + $Guid + '.bak'
+                [System.IO.File]::Move($outputPath, $backupPath)
+                $backupPaths += [pscustomobject]@{ Original = $outputPath; Backup = $backupPath }
+            }
         }
-        [System.IO.File]::Replace($StagedPath, $OutputPath, $null)
+
+        [System.IO.File]::Move($SymStagedPath, $SymOutputPath)
+        $publishedPaths += $SymOutputPath
+        [System.IO.File]::Move($PatchStagedPath, $PatchOutputPath)
+        $publishedPaths += $PatchOutputPath
     }
-    else {
-        [System.IO.File]::Move($StagedPath, $OutputPath)
+    catch {
+        $publicationError = $_.Exception.Message
+        $rollbackErrors = @()
+        foreach ($outputPath in $publishedPaths) {
+            try {
+                [System.IO.File]::Delete($outputPath)
+            }
+            catch {
+                $rollbackErrors += "Could not remove new output '$outputPath': $($_.Exception.Message)"
+            }
+        }
+        foreach ($backup in $backupPaths) {
+            try {
+                [System.IO.File]::Move($backup.Backup, $backup.Original)
+            }
+            catch {
+                $rollbackErrors += "Could not restore '$($backup.Original)' from '$($backup.Backup)': $($_.Exception.Message)"
+            }
+        }
+
+        if ($rollbackErrors.Count -gt 0) {
+            throw "Output replacement failed: $publicationError. Rollback was incomplete: $($rollbackErrors -join '; ')"
+        }
+        throw "Output replacement failed; existing outputs were restored: $publicationError"
+    }
+
+    foreach ($backup in $backupPaths) {
+        try {
+            [System.IO.File]::Delete($backup.Backup)
+        }
+        catch {
+            [Console]::Error.WriteLine("WARNING: Could not remove backup file: $($backup.Backup)")
+        }
     }
 }
 
 $tempPaths = @()
-$backupPaths = @()
-$publishedPaths = @()
-$publicationComplete = $false
 try {
     $resolvedRomPath = [System.IO.Path]::GetFullPath($RomPath)
     if ([System.IO.Path]::GetExtension($resolvedRomPath) -ine '.gba') {
@@ -167,9 +207,6 @@ try {
     foreach ($outputPath in @($symPath, $patchPath)) {
         if ([System.IO.Directory]::Exists($outputPath)) {
             throw "Output path is a directory: $outputPath"
-        }
-        if ([System.IO.File]::Exists($outputPath) -and -not $Force) {
-            throw "Output already exists; use -Force to replace .sym and .patch: $outputPath"
         }
     }
 
@@ -207,31 +244,7 @@ try {
         throw 'Patch generation failed; existing outputs were not replaced.'
     }
 
-    if ($Force) {
-        foreach ($outputPath in @($symPath, $patchPath)) {
-            if ([System.IO.File]::Exists($outputPath)) {
-                $backupPath = $outputPath + '.' + $guid + '.bak'
-                [System.IO.File]::Move($outputPath, $backupPath)
-                $backupPaths += [pscustomobject]@{ Original = $outputPath; Backup = $backupPath }
-            }
-        }
-    }
-
-    Publish-StagedFile -StagedPath $symStage -OutputPath $symPath -Force:$Force
-    $publishedPaths += $symPath
-    Publish-StagedFile -StagedPath $patchStage -OutputPath $patchPath -Force:$Force
-    $publishedPaths += $patchPath
-    $publicationComplete = $true
-
-    foreach ($backup in $backupPaths) {
-        try {
-            [System.IO.File]::Delete($backup.Backup)
-        }
-        catch {
-            [Console]::Error.WriteLine("WARNING: Could not remove backup file: $($backup.Backup)")
-        }
-    }
-    $backupPaths = @()
+    Publish-StagedOutputs -SymStagedPath $symStage -SymOutputPath $symPath -PatchStagedPath $patchStage -PatchOutputPath $patchPath -Guid $guid
 
     [Console]::WriteLine($runnerResult.Output.TrimEnd())
     [Console]::WriteLine("SYM: $symPath")
@@ -239,18 +252,6 @@ try {
     exit 0
 }
 catch {
-    if (-not $publicationComplete) {
-        foreach ($outputPath in $publishedPaths) {
-            if ([System.IO.File]::Exists($outputPath)) {
-                [System.IO.File]::Delete($outputPath)
-            }
-        }
-        foreach ($backup in $backupPaths) {
-            if ([System.IO.File]::Exists($backup.Backup)) {
-                [System.IO.File]::Move($backup.Backup, $backup.Original)
-            }
-        }
-    }
     [Console]::Error.WriteLine("ERROR: $($_.Exception.Message)")
     exit 1
 }

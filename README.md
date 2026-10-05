@@ -38,10 +38,10 @@ SuperFWでは、`.patch` を次のどちらかに配置してください。
 
 - IRQパッチがあればゲーム内メニューからRTC時刻を変更できます
 
-- 既存の `.sym` または `.patch` は上書きしません。両方を明示的に置き換える場合だけ、PowerShellから `-Force` を指定します
+- 既存の `.sym` と `.patch` は生成成功後に自動で上書きします。生成に失敗した場合は既存ファイルを維持します
 
 ```powershell
-powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.ps1 -RomPath 'C:\path\to\Pokemon_FireRed.gba' -Force
+powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.ps1 -RomPath 'C:\path\to\Pokemon_FireRed.gba'
 ```
 
 ## 従来のsym専用フロー
