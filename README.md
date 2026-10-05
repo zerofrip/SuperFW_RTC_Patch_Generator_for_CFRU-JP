@@ -14,11 +14,10 @@
 
 - いずれもPython 3.8以降でなければ停止します
 
-`SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.bat` に対象の `.gba` を1本だけドラッグ＆ドロップすると、ROMと同じフォルダーに同じベース名の `.sym` と `.patch` が生成されます
+`SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.bat` に対象の `.gba` を1本だけドラッグ＆ドロップすると、ROMと同じフォルダーに同じベース名の `.patch` が生成されます。`.sym` はパッチ生成中の一時ファイルで、成功後に削除されます
 
 ```text
 Pokemon_FireRed.gba
-Pokemon_FireRed.sym
 Pokemon_FireRed.patch
 ```
 
@@ -38,7 +37,7 @@ SuperFWでは、`.patch` を次のどちらかに配置してください。
 
 - IRQパッチがあればゲーム内メニューからRTC時刻を変更できます
 
-- 既存の `.sym` と `.patch` は生成成功後に自動で上書きします。生成に失敗した場合は既存ファイルを維持します
+- 既存の `.patch` は生成成功後に自動で上書きし、既存の `.sym` はパッチ公開後に削除します。生成または公開に失敗した場合は既存の `.sym` と `.patch` を維持・復元します
 
 ```powershell
 powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SuperFW_RTC_Sym_And_Patch_Generator_for_CFRU-JP.ps1 -RomPath 'C:\path\to\Pokemon_FireRed.gba'
@@ -70,7 +69,7 @@ powershell.exe -NoProfile -ExecutionPolicy Bypass -File .\SuperFW_RTC_Sym_Genera
 
 - ROMデータを送信・共有しません
 
-- 成功時にROM、`.sym`、`.patch` のSHA-256とパッチ件数を表示します
+- 成功時にROM、一時生成した`.sym`、`.patch` のSHA-256とパッチ件数を表示します。最終出力として残るのは`.patch`だけです
 
 - 署名は検証済み3 ROMで同一だったCFRU-JP RTC関数の完全な機械語です。コード配置が異なるROMにも対応しますが、CFRU-JPやコンパイラの別版で機械語が異なる場合は安全側に失敗します
 

@@ -143,18 +143,21 @@ function Publish-StagedOutputs {
     $backupPaths = @()
     $publishedPaths = @()
     try {
-        foreach ($outputPath in @($SymOutputPath, $PatchOutputPath)) {
-            if ([System.IO.File]::Exists($outputPath)) {
-                $backupPath = $outputPath + '.' + $Guid + '.bak'
-                [System.IO.File]::Move($outputPath, $backupPath)
-                $backupPaths += [pscustomobject]@{ Original = $outputPath; Backup = $backupPath }
-            }
+        if ([System.IO.File]::Exists($PatchOutputPath)) {
+            $backupPath = $PatchOutputPath + '.' + $Guid + '.bak'
+            [System.IO.File]::Move($PatchOutputPath, $backupPath)
+            $backupPaths += [pscustomobject]@{ Original = $PatchOutputPath; Backup = $backupPath }
         }
 
-        [System.IO.File]::Move($SymStagedPath, $SymOutputPath)
-        $publishedPaths += $SymOutputPath
         [System.IO.File]::Move($PatchStagedPath, $PatchOutputPath)
         $publishedPaths += $PatchOutputPath
+        [System.IO.File]::Delete($SymStagedPath)
+
+        if ([System.IO.File]::Exists($SymOutputPath)) {
+            $backupPath = $SymOutputPath + '.' + $Guid + '.bak'
+            [System.IO.File]::Move($SymOutputPath, $backupPath)
+            $backupPaths += [pscustomobject]@{ Original = $SymOutputPath; Backup = $backupPath }
+        }
     }
     catch {
         $publicationError = $_.Exception.Message
@@ -247,7 +250,6 @@ try {
     Publish-StagedOutputs -SymStagedPath $symStage -SymOutputPath $symPath -PatchStagedPath $patchStage -PatchOutputPath $patchPath -Guid $guid
 
     [Console]::WriteLine($runnerResult.Output.TrimEnd())
-    [Console]::WriteLine("SYM: $symPath")
     [Console]::WriteLine("PATCH: $patchPath")
     exit 0
 }

@@ -190,10 +190,21 @@ try {
     [System.IO.File]::WriteAllText($publishSymStage, 'new sym')
     [System.IO.File]::WriteAllText($publishPatchStage, 'new patch')
     Publish-StagedOutputs -SymStagedPath $publishSymStage -SymOutputPath $publishSymPath -PatchStagedPath $publishPatchStage -PatchOutputPath $publishPatchPath -Guid ([guid]::NewGuid().ToString('N'))
-    Assert-True ([System.IO.File]::ReadAllText($publishSymPath) -ceq 'new sym') 'successful publication overwrites the existing symbol output'
+    Assert-True (-not [System.IO.File]::Exists($publishSymPath)) 'successful publication removes the existing symbol output after publishing the patch'
     Assert-True ([System.IO.File]::ReadAllText($publishPatchPath) -ceq 'new patch') 'successful publication overwrites the existing patch output'
     Assert-True (@([System.IO.Directory]::GetFiles($publishRoot, '*.bak')).Count -eq 0) 'successful publication removes backups'
     Assert-True (-not [System.IO.File]::Exists($publishSymStage) -and -not [System.IO.File]::Exists($publishPatchStage)) 'successful publication consumes staged outputs'
+
+    $newSymPath = Join-Path $publishRoot 'new.sym'
+    $newPatchPath = Join-Path $publishRoot 'new.patch'
+    $newSymStage = Join-Path $publishRoot 'new.staged.sym'
+    $newPatchStage = Join-Path $publishRoot 'new.staged.patch'
+    [System.IO.File]::WriteAllText($newSymStage, 'new sym')
+    [System.IO.File]::WriteAllText($newPatchStage, 'new patch')
+    Publish-StagedOutputs -SymStagedPath $newSymStage -SymOutputPath $newSymPath -PatchStagedPath $newPatchStage -PatchOutputPath $newPatchPath -Guid ([guid]::NewGuid().ToString('N'))
+    Assert-True (-not [System.IO.File]::Exists($newSymPath)) 'successful publication without prior outputs leaves no symbol file'
+    Assert-True ([System.IO.File]::ReadAllText($newPatchPath) -ceq 'new patch') 'successful publication without prior outputs leaves the patch'
+    Assert-True (-not [System.IO.File]::Exists($newSymStage) -and -not [System.IO.File]::Exists($newPatchStage)) 'successful publication without prior outputs cleans staging files'
 
     [System.IO.File]::WriteAllText($publishSymPath, 'preserved sym')
     [System.IO.File]::WriteAllText($publishPatchPath, 'preserved patch')
@@ -208,6 +219,7 @@ try {
     Assert-True (-not [string]::IsNullOrWhiteSpace($publishFailure)) 'failed pair publication is reported'
     Assert-True ([System.IO.File]::ReadAllText($publishSymPath) -ceq 'preserved sym') 'failed publication restores the previous symbol output'
     Assert-True ([System.IO.File]::ReadAllText($publishPatchPath) -ceq 'preserved patch') 'failed publication preserves the previous patch output'
+    Assert-True ([System.IO.File]::Exists($publishSymStage)) 'failed publication leaves staged symbols available for outer cleanup'
     Assert-True (@([System.IO.Directory]::GetFiles($publishRoot, '*.bak')).Count -eq 0) 'rollback restores outputs without backup leftovers'
 
     $script:pythonProbeAttempts = @()
