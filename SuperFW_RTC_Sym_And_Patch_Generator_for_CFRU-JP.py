@@ -26,6 +26,14 @@ RTC_GETTIMEDATE_TAIL_WORDS = (
     0x477021B4,  # mov r1,#180; bx lr
 )
 RTC_GETTIMEDATE_MIN_SIZE = RTC_GETTIMEDATE_TAIL_OFFSET + len(RTC_GETTIMEDATE_TAIL_WORDS) * 4
+RTC_GETTIMEDATE_HANDLER_WORDS = (
+    0x4778B530, 0xE10F3000, 0xE321F09B, 0xE08EE18D, 0xE1A0500E, 0xE121F003, 0xE28F2001, 0xE12FFF12,
+    0x213C1C04, 0xF827F000, 0x213C71A0, 0xF823F000, 0x21187160, 0xF81FF000, 0xF0007120, 0x31B9F831,
+    0x0783A211, 0x3101D101, 0x1A6D320C, 0x186DD2F6, 0xF815F000, 0x20007020, 0x30015C11, 0xD2FB1A6D,
+    0xF000186D, 0x7060F80C, 0xF0001C68, 0x70A0F808, 0xBC01BC30, 0x1C284700, 0x1C05DF06, 0x210A1C08,
+    0x0100DF06, 0x47704308, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F, 0x1F1E1F1E,
+    0x30061C28, 0xDF062107, 0x224070E1, 0x200071E2, 0x477021B4,
+)
 
 
 class GenerationError(Exception):
@@ -111,7 +119,51 @@ def analyze_rom(rom, sym_text, analyzers=None):
     return merge_results(results)
 
 
-def _rtc_compatibility_patch(patchset, generator_module):
+def _rtc_relocation_patch(patchset, layout, address, size, generator_module):
+    if address & 3 or size < RTC_GETTIMEDATE_MIN_SIZE or address + size > 0x2000000:
+        raise GenerationError("RTC gettimedate target is unaligned or outside the ROM address range")
+    if len(layout) != 1 or isinstance(layout[0], bool) or not isinstance(layout[0], int) or not 0 <= layout[0] <= 0xFFFFFFFF:
+        raise GenerationError("RTC relocation requires one valid ROM layout word")
+
+    layout_word = layout[0]
+    hole_start = (layout_word >> 16) << 10
+    hole_size_units = layout_word & 0xFFFF
+    hole_size = hole_size_units << 10
+    hole_end = hole_start + hole_size
+    if hole_size_units <= 1 or hole_start & 0x3FF or hole_size & 0x3FF or hole_end > 0x2000000:
+        raise GenerationError("RTC relocation layout hole is malformed or too small")
+
+    relocated = hole_end - 0x400
+    handler_end = relocated + len(RTC_GETTIMEDATE_HANDLER_WORDS) * 4
+    if relocated >= 0x1000000 or handler_end > 0x1000000:
+        raise GenerationError("RTC relocation address must remain below 16 MiB")
+
+    rtc_targets = patchset.get("targets", {}).get("rtc", {})
+    for name, function in rtc_targets.items():
+        if not isinstance(function, dict) or not isinstance(function.get("addr"), str):
+            raise GenerationError("RTC handler target is malformed")
+        try:
+            function_address = int(function["addr"], 16)
+            function_size = function["size"]
+        except (KeyError, TypeError, ValueError) as error:
+            raise GenerationError("RTC handler target is malformed") from error
+        if isinstance(function_size, bool) or not isinstance(function_size, int) or function_size <= 0:
+            raise GenerationError("RTC handler target is malformed")
+        if relocated < function_address + function_size and function_address < handler_end:
+            raise GenerationError("RTC relocation overlaps an existing RTC handler")
+
+    layout[0] = (layout_word & 0xFFFF0000) | (hole_size_units - 1)
+    raw_patch = []
+    for index in range(0, len(RTC_GETTIMEDATE_HANDLER_WORDS), 8):
+        words = list(RTC_GETTIMEDATE_HANDLER_WORDS[index:index + 8])
+        raw_patch += generator_module.gen_cpywords(relocated + index * 4, words)
+    raw_patch += generator_module.gen_cpywords(
+        address, [0x47184B00, 0x08000000 + relocated | 1]
+    )
+    return raw_patch
+
+
+def _rtc_compatibility_patch(patchset, generator_module, layout):
     try:
         target = patchset["targets"]["rtc"]["gettimedate_fn"]
         if not isinstance(target, dict):
@@ -127,10 +179,19 @@ def _rtc_compatibility_patch(patchset, generator_module):
             raise ValueError("target is too small")
         if address < 0 or address + RTC_GETTIMEDATE_MIN_SIZE - 1 > 0x1FFFFFF:
             raise ValueError("address is outside the ROM address range")
+        high_rom = address >= 0x1000000
     except (KeyError, TypeError, ValueError) as error:
         raise GenerationError(
             "RTC gettimedate target is missing or malformed, or is too small through offset 0xB3"
         ) from error
+
+    if high_rom:
+        try:
+            return _rtc_relocation_patch(patchset, layout, address, size, generator_module)
+        except GenerationError:
+            raise
+        except Exception as error:
+            raise GenerationError("Could not generate RTC relocation patch: %s" % error) from error
 
     try:
         # These raw words are intentional: gen_cpywords writes little-endian Thumb
@@ -172,7 +233,7 @@ def serialize_patch(patchset, generator_module=None):
         programs = generator_module.PROGRAMS[:4]
     except Exception as error:
         raise GenerationError("GamePatch failed: %s" % error) from error
-    rtc += _rtc_compatibility_patch(patchset, generator_module)
+    rtc += _rtc_compatibility_patch(patchset, generator_module, layout)
 
     counts = (len(waitcnt), len(save), save_type, len(irq), len(rtc))
     if any(not isinstance(value, int) or value < 0 or value > 255 for value in counts):

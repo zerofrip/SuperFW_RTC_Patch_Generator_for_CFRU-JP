@@ -50,6 +50,15 @@ class FakeGenerator:
         return [(4 << 28) | ((len(words) - 1) << 25) | addr] + words
 
 
+class HighRomGamePatch(FakeGamePatch):
+    def layout_patches(self):
+        return [(0x36B0 << 16) | 0x4DF]
+
+
+class HighRomGenerator(FakeGenerator):
+    GamePatch = HighRomGamePatch
+
+
 def result(targets=None):
     return {
         "result": "ok",
@@ -229,6 +238,115 @@ class SerializationTests(unittest.TestCase):
         self.assertEqual(words[11:], ((4 << 28) | (4 << 25) | 0x12D4, 0x30061C28, 0xDF062107, 0x224070E1, 0x200071E2, 0x477021B4))
         self.assertEqual(patch[356:], bytes(444))
         self.assertEqual(counts, {"waitcnt": 1, "save": 1, "save_type": 2, "irq": 1, "rtc": 14, "layout": 1})
+
+    def test_high_rom_relocates_handler_in_chunked_copies_and_veneers_entry(self):
+        patch, counts = runner.serialize_patch(
+            {
+                "game-code": "BPRJ", "game-version": 1,
+                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 0xBC}}},
+                "romsize": 0x2000000,
+            },
+            generator_module=HighRomGenerator,
+        )
+
+        self.assertEqual(len(patch), 800)
+        self.assertEqual(struct.unpack_from("<BBBBBxIxxxxxx", patch, 16), (1, 1, 2, 1, 58, (0x36B0 << 16) | 0x4DE))
+        rtc_offset = 288 + 4 * 3
+        rtc_words = struct.unpack_from("<58I", patch, rtc_offset)
+        self.assertEqual(rtc_words[:4], tuple(FakeGamePatch("BPRJ", 1, {}, 0).rtc_patches()))
+
+        copies = []
+        cursor = 4
+        while cursor < len(rtc_words):
+            operation = rtc_words[cursor]
+            word_count = ((operation >> 25) & 7) + 1
+            copies.append((operation >> 28, operation & 0x1FFFFFF, rtc_words[cursor + 1:cursor + 1 + word_count]))
+            cursor += word_count + 1
+        self.assertEqual([len(words) for _, _, words in copies], [8, 8, 8, 8, 8, 5, 2])
+        self.assertEqual([address for _, address, _ in copies[:6]], [0xEE3800 + index * 0x20 for index in range(6)])
+        self.assertTrue(all(operation == 4 for operation, _, _ in copies))
+        expected_handler = (
+            0x4778B530, 0xE10F3000, 0xE321F09B, 0xE08EE18D, 0xE1A0500E, 0xE121F003, 0xE28F2001, 0xE12FFF12,
+            0x213C1C04, 0xF827F000, 0x213C71A0, 0xF823F000, 0x21187160, 0xF81FF000, 0xF0007120, 0x31B9F831,
+            0x0783A211, 0x3101D101, 0x1A6D320C, 0x186DD2F6, 0xF815F000, 0x20007020, 0x30015C11, 0xD2FB1A6D,
+            0xF000186D, 0x7060F80C, 0xF0001C68, 0x70A0F808, 0xBC01BC30, 0x1C284700, 0x1C05DF06, 0x210A1C08,
+            0x0100DF06, 0x47704308, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F, 0x1F1E1F1E,
+            0x30061C28, 0xDF062107, 0x224070E1, 0x200071E2, 0x477021B4,
+        )
+        self.assertEqual(tuple(word for _, _, words in copies[:6] for word in words), expected_handler)
+        self.assertEqual(len(expected_handler), 45)
+        self.assertEqual(copies[-1], (4, 0x10E9BD8, (0x47184B00, 0x08EE3801)))
+        self.assertEqual(counts["rtc"], 58)
+
+    def test_high_rom_requires_full_original_gettimedate_span(self):
+        for size in (8, 0xB3):
+            with self.subTest(size=size):
+                with self.assertRaisesRegex(runner.GenerationError, "through offset 0xB3"):
+                    runner.serialize_patch(
+                        {
+                            "game-code": "BPRJ", "game-version": 1,
+                            "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": size}}},
+                            "romsize": 0x2000000,
+                        },
+                        generator_module=HighRomGenerator,
+                    )
+
+    def test_high_rom_relocation_rejects_invalid_layout_and_target(self):
+        invalid_cases = [
+            ("missing layout", HighRomGamePatch, "0x10e9bd8", None),
+            ("malformed layout", HighRomGamePatch, "0x10e9bd8", True),
+            ("small hole", HighRomGamePatch, "0x10e9bd8", (0x36B0 << 16) | 1),
+            ("unaligned target", HighRomGamePatch, "0x10e9bd9", (0x36B0 << 16) | 0x4DF),
+            ("relocation above 16 MiB", HighRomGamePatch, "0x10e9bd8", (0x4000 << 16) | 4),
+        ]
+        for name, base_game_patch, address, layout_word in invalid_cases:
+            with self.subTest(name=name):
+                layout_patches = lambda self: [] if layout_word is None else [layout_word]
+                InvalidLayoutGamePatch = type(
+                    "InvalidLayoutGamePatch", (base_game_patch,), {"layout_patches": layout_patches}
+                )
+
+                class InvalidLayoutGenerator(FakeGenerator):
+                    GamePatch = InvalidLayoutGamePatch
+
+                with self.assertRaises(runner.GenerationError):
+                    runner.serialize_patch(
+                        {
+                            "game-code": "BPRJ", "game-version": 1,
+                            "targets": {"rtc": {"gettimedate_fn": {"addr": address, "size": 0xBC}}},
+                            "romsize": 0x2000000,
+                        },
+                        generator_module=InvalidLayoutGenerator,
+                    )
+
+    def test_high_rom_relocation_rejects_overlap_and_oversized_payload(self):
+        overlapping = {
+            "game-code": "BPRJ", "game-version": 1,
+            "targets": {"rtc": {
+                "gettimedate_fn": {"addr": "0x10e9bd8", "size": 0xBC},
+                "probe_fn": {"addr": "0xee3800", "size": 4},
+            }},
+            "romsize": 0x2000000,
+        }
+        with self.assertRaisesRegex(runner.GenerationError, "overlaps"):
+            runner.serialize_patch(overlapping, generator_module=HighRomGenerator)
+
+        class LargePayloadGamePatch(HighRomGamePatch):
+            def waitcnt_patches(self):
+                return [0x11223344] * 130
+
+        class LargePayloadGenerator(HighRomGenerator):
+            GamePatch = LargePayloadGamePatch
+
+        with self.assertRaisesRegex(runner.GenerationError, "exceeds 512 bytes"):
+            runner.serialize_patch(
+                {
+                    "game-code": "BPRJ", "game-version": 1,
+                    "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 0xBC}}},
+                    "romsize": 0x2000000,
+                },
+                generator_module=LargePayloadGenerator,
+            )
 
     def test_missing_malformed_or_too_small_gettimedate_target_fails_closed(self):
         targets = [
