@@ -151,8 +151,8 @@ def _rtc_relocation_patch(patchset, layout, address, size, generator_module, han
 
     relocated = hole_end - 0x400
     handler_end = relocated + len(handler_words) * 4
-    if relocated >= 0x1000000 or handler_end > 0x1000000:
-        raise GenerationError("RTC relocation address must remain below 16 MiB")
+    if handler_end > 0x2000000:
+        raise GenerationError("RTC relocation handler must remain within the 32 MiB ROM address range")
 
     rtc_targets = patchset.get("targets", {}).get("rtc", {})
     for name, function in rtc_targets.items():

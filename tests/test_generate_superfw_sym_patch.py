@@ -302,7 +302,7 @@ class SerializationTests(unittest.TestCase):
                 ])
         self.assertEqual(error.exception.code, 2)
 
-    def test_default_high_rom_rejects_overlap_and_relocation_above_16_mib(self):
+    def test_default_high_rom_rejects_overlap_and_relocates_above_16_mib(self):
         overlapping = {
             "game-code": "BPRJ", "game-version": 1,
             "targets": {"rtc": {
@@ -321,15 +321,20 @@ class SerializationTests(unittest.TestCase):
         class Above16MiBGenerator(FakeGenerator):
             GamePatch = Above16MiBGamePatch
 
-        with self.assertRaisesRegex(runner.GenerationError, "below 16 MiB"):
-            runner.serialize_patch(
-                {
-                    "game-code": "BPRJ", "game-version": 1,
-                    "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}}},
-                    "romsize": 0x2000000,
-                },
-                generator_module=Above16MiBGenerator,
-            )
+        patch, _ = runner.serialize_patch(
+            {
+                "game-code": "BPRJ", "game-version": 1,
+                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}}},
+                "romsize": 0x2000000,
+            },
+            generator_module=Above16MiBGenerator,
+        )
+        self.assertEqual(struct.unpack_from("<I", patch, 22)[0], (0x4000 << 16) | 3)
+        rtc_words = struct.unpack_from("<60I", patch, 288 + 4 * 3)
+        copies = copy_operations(rtc_words, 4)
+        self.assertEqual([address for _, address, _ in copies[:-1]], [0x01000C00 + index * 32 for index in range(6)])
+        self.assertTrue(all(operation == 4 for operation, _, _ in copies))
+        self.assertEqual(copies[-1], (4, 0x10E9BD8, (0x47184B00, 0x09000C01)))
 
     def test_serialization_matches_800_byte_header_programs_and_payload(self):
         patch, counts = runner.serialize_patch(
@@ -420,7 +425,6 @@ class SerializationTests(unittest.TestCase):
             ("malformed layout", HighRomGamePatch, "0x10e9bd8", True),
             ("small hole", HighRomGamePatch, "0x10e9bd8", (0x36B0 << 16) | 1),
             ("unaligned target", HighRomGamePatch, "0x10e9bd9", (0x36B0 << 16) | 0x4DF),
-            ("relocation above 16 MiB", HighRomGamePatch, "0x10e9bd8", (0x4000 << 16) | 4),
         ]
         for name, base_game_patch, address, layout_word in invalid_cases:
             with self.subTest(name=name):
@@ -442,6 +446,18 @@ class SerializationTests(unittest.TestCase):
                         generator_module=InvalidLayoutGenerator,
                         profile="legacy-v0.19-v0.21",
                     )
+
+    def test_relocated_handler_end_crossing_32_mib_is_rejected(self):
+        with self.assertRaisesRegex(runner.GenerationError, "32 MiB"):
+            runner._rtc_relocation_patch(
+                {"targets": {"rtc": {}}},
+                [(0x7FFC << 16) | 4],
+                0x10E9BD8,
+                8,
+                FakeGenerator,
+                [0] * 257,
+                8,
+            )
 
     def test_high_rom_relocation_rejects_overlap_and_oversized_payload(self):
         overlapping = {
