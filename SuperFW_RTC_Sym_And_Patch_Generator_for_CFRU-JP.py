@@ -45,6 +45,7 @@ RTC_GETTIMEDATE_0212_HANDLER_WORDS = (
     0x46C04770, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F, 0x1F1E1F1E
 )
 RTC_GETTIMEDATE_0212_SIZE = len(RTC_GETTIMEDATE_0212_HANDLER_WORDS) * 4
+LOW_ROM_LIMIT = 0x1000000
 
 
 class GenerationError(Exception):
@@ -135,24 +136,75 @@ def analyze_rom(rom, sym_text, analyzers=None):
     return merge_results(results)
 
 
+def _select_low_rom_layout(patchset, layout):
+    layout_word = layout[0]
+    layout_start = (layout_word >> 16) << 10
+    layout_size = (layout_word & 0xFFFF) << 10
+    if layout_start + layout_size <= LOW_ROM_LIMIT:
+        return
+
+    try:
+        info = patchset["targets"]["layout"]["info"]
+        romsize = patchset["romsize"]
+        if not isinstance(info, dict) or isinstance(romsize, bool) or not isinstance(romsize, int):
+            raise ValueError("invalid layout metadata")
+    except (KeyError, TypeError, ValueError) as error:
+        raise GenerationError("RTC relocation requires an eligible layout candidate below 16 MiB") from error
+
+    candidates = []
+
+    def add_candidate(start, size):
+        if (
+            start >= 0 and size >= 0x800 and start & 0x3FF == 0 and size & 0x3FF == 0
+            and start + size <= LOW_ROM_LIMIT
+        ):
+            candidates.append((size, start))
+
+    tail_size = info.get("tail-padding")
+    if isinstance(tail_size, int) and not isinstance(tail_size, bool) and tail_size >= 4 * 1024:
+        start = (romsize - tail_size + 1023) & ~1023
+        size = romsize - start - 1024
+        if size >= 7 * 1024:
+            add_candidate(start, (size >> 10) << 10)
+
+    holes = info.get("holes", [])
+    if isinstance(holes, list):
+        for hole in holes:
+            if (
+                isinstance(hole, (list, tuple)) and len(hole) == 2
+                and all(isinstance(value, int) and not isinstance(value, bool) for value in hole)
+            ):
+                hole_start, hole_size = hole
+                start = (hole_start + 8 * 1024) & ~1023
+                size = (hole_size - 16 * 1024) & ~1023
+                add_candidate(start, size)
+
+    if not candidates:
+        raise GenerationError("RTC relocation requires an eligible layout candidate below 16 MiB")
+
+    size, start = max(candidates)
+    layout[0] = ((start >> 10) << 16) | (size >> 10)
+
+
 def _rtc_relocation_patch(patchset, layout, address, size, generator_module, handler_words, minimum_size):
     if address & 3 or size < minimum_size or address + size > 0x2000000:
         raise GenerationError("RTC gettimedate target is unaligned or outside the ROM address range")
     if len(layout) != 1 or isinstance(layout[0], bool) or not isinstance(layout[0], int) or not 0 <= layout[0] <= 0xFFFFFFFF:
         raise GenerationError("RTC relocation requires one valid ROM layout word")
 
+    _select_low_rom_layout(patchset, layout)
     layout_word = layout[0]
     hole_start = (layout_word >> 16) << 10
     hole_size_units = layout_word & 0xFFFF
     hole_size = hole_size_units << 10
     hole_end = hole_start + hole_size
-    if hole_size_units <= 1 or hole_start & 0x3FF or hole_size & 0x3FF or hole_end > 0x2000000:
+    if hole_size_units <= 1 or hole_start & 0x3FF or hole_size & 0x3FF or hole_end > LOW_ROM_LIMIT:
         raise GenerationError("RTC relocation layout hole is malformed or too small")
 
     relocated = hole_end - 0x400
     handler_end = relocated + len(handler_words) * 4
-    if handler_end > 0x2000000:
-        raise GenerationError("RTC relocation handler must remain within the 32 MiB ROM address range")
+    if handler_end > LOW_ROM_LIMIT:
+        raise GenerationError("RTC relocation handler must remain below 16 MiB")
 
     rtc_targets = patchset.get("targets", {}).get("rtc", {})
     for name, function in rtc_targets.items():

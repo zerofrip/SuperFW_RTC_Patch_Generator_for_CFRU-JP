@@ -59,6 +59,18 @@ class HighRomGenerator(FakeGenerator):
     GamePatch = HighRomGamePatch
 
 
+HIGH_TAIL_LAYOUT_WORD = (0x7AC3 << 16) | 0x53C
+
+
+class HighTailGamePatch(FakeGamePatch):
+    def layout_patches(self):
+        return [HIGH_TAIL_LAYOUT_WORD]
+
+
+class HighTailGenerator(FakeGenerator):
+    GamePatch = HighTailGamePatch
+
+
 EXPECTED_0212_HANDLER = (
     0x4778B530, 0xE10F3000, 0xE321F09B, 0xE20D1007, 0xE04DD181, 0x328EE001, 0x328DDD16, 0xE1A0500E,
     0xE121F003, 0xE28F2001, 0xE12FFF12, 0x213C1C04, 0xF82EF000, 0x213C71A0, 0xF82AF000, 0x21187160,
@@ -259,10 +271,21 @@ class SerializationTests(unittest.TestCase):
         patch, counts = runner.serialize_patch(
             {
                 "game-code": "BPRJ", "game-version": 1,
-                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}}},
+                "targets": {
+                    "rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}},
+                    "layout": {"info": {
+                        "tail-padding": 0x14F5EF,
+                        "holes": [
+                            (0x00DAA180, 0x0013BC90),
+                            (0x01597A5B, 0x000A85A5),
+                            (0x00B583C4, 0x000A7C3C),
+                            (0x00F00000, 0x00039701),
+                        ],
+                    }},
+                },
                 "romsize": 0x2000000,
             },
-            generator_module=HighRomGenerator,
+            generator_module=HighTailGenerator,
         )
 
         self.assertEqual(counts["rtc"], 60)
@@ -302,7 +325,7 @@ class SerializationTests(unittest.TestCase):
                 ])
         self.assertEqual(error.exception.code, 2)
 
-    def test_default_high_rom_rejects_overlap_and_relocates_above_16_mib(self):
+    def test_default_high_rom_rejects_overlap(self):
         overlapping = {
             "game-code": "BPRJ", "game-version": 1,
             "targets": {"rtc": {
@@ -314,27 +337,46 @@ class SerializationTests(unittest.TestCase):
         with self.assertRaisesRegex(runner.GenerationError, "overlaps"):
             runner.serialize_patch(overlapping, generator_module=HighRomGenerator)
 
-        class Above16MiBGamePatch(HighRomGamePatch):
+    def test_high_only_layout_is_rejected_for_relocation(self):
+        class HighOnlyGamePatch(FakeGamePatch):
             def layout_patches(self):
-                return [(0x4000 << 16) | 4]
+                return [HIGH_TAIL_LAYOUT_WORD]
 
-        class Above16MiBGenerator(FakeGenerator):
-            GamePatch = Above16MiBGamePatch
+        class HighOnlyGenerator(FakeGenerator):
+            GamePatch = HighOnlyGamePatch
 
-        patch, _ = runner.serialize_patch(
-            {
-                "game-code": "BPRJ", "game-version": 1,
-                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}}},
-                "romsize": 0x2000000,
-            },
-            generator_module=Above16MiBGenerator,
-        )
-        self.assertEqual(struct.unpack_from("<I", patch, 22)[0], (0x4000 << 16) | 3)
-        rtc_words = struct.unpack_from("<60I", patch, 288 + 4 * 3)
-        copies = copy_operations(rtc_words, 4)
-        self.assertEqual([address for _, address, _ in copies[:-1]], [0x01000C00 + index * 32 for index in range(6)])
-        self.assertTrue(all(operation == 4 for operation, _, _ in copies))
-        self.assertEqual(copies[-1], (4, 0x10E9BD8, (0x47184B00, 0x09000C01)))
+        with self.assertRaisesRegex(runner.GenerationError, "eligible layout candidate below 16 MiB"):
+            runner.serialize_patch(
+                {
+                    "game-code": "BPRJ", "game-version": 1,
+                    "targets": {
+                        "rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}},
+                        "layout": {"info": {
+                            "tail-padding": 0x14F5EF,
+                            "holes": [(0x01597A5B, 0x000A85A5)],
+                        }},
+                    },
+                    "romsize": 0x2000000,
+                },
+                generator_module=HighOnlyGenerator,
+            )
+
+    def test_layout_selection_skips_larger_ineligible_holes(self):
+        layout = [HIGH_TAIL_LAYOUT_WORD]
+        patchset = {
+            "romsize": 0x2000000,
+            "targets": {"layout": {"info": {
+                "tail-padding": 0x14F5EF,
+                "holes": [
+                    (0x00DAA180, 0x0013BC90),
+                    (0x01500000, 0x00200000),
+                ],
+            }}},
+        }
+
+        runner._select_low_rom_layout(patchset, layout)
+
+        self.assertEqual(layout, [(0x36B0 << 16) | 0x4DF])
 
     def test_serialization_matches_800_byte_header_programs_and_payload(self):
         patch, counts = runner.serialize_patch(
@@ -364,14 +406,25 @@ class SerializationTests(unittest.TestCase):
         self.assertEqual(patch[356:], bytes(444))
         self.assertEqual(counts, {"waitcnt": 1, "save": 1, "save_type": 2, "irq": 1, "rtc": 14, "layout": 1})
 
-    def test_high_rom_relocates_handler_in_chunked_copies_and_veneers_entry(self):
+    def test_high_rom_selects_largest_eligible_low_hole_and_relocates_handler(self):
         patch, counts = runner.serialize_patch(
             {
                 "game-code": "BPRJ", "game-version": 1,
-                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 0xBC}}},
+                "targets": {
+                    "rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 0xBC}},
+                    "layout": {"info": {
+                        "tail-padding": 0x14F5EF,
+                        "holes": [
+                            (0x00DAA180, 0x0013BC90),
+                            (0x01597A5B, 0x000A85A5),
+                            (0x00B583C4, 0x000A7C3C),
+                            (0x00F00000, 0x00039701),
+                        ],
+                    }},
+                },
                 "romsize": 0x2000000,
             },
-            generator_module=HighRomGenerator,
+            generator_module=HighTailGenerator,
             profile="legacy-v0.19-v0.21",
         )
 
@@ -447,11 +500,11 @@ class SerializationTests(unittest.TestCase):
                         profile="legacy-v0.19-v0.21",
                     )
 
-    def test_relocated_handler_end_crossing_32_mib_is_rejected(self):
-        with self.assertRaisesRegex(runner.GenerationError, "32 MiB"):
+    def test_relocated_handler_end_crossing_16_mib_is_rejected(self):
+        with self.assertRaisesRegex(runner.GenerationError, "below 16 MiB"):
             runner._rtc_relocation_patch(
                 {"targets": {"rtc": {}}},
-                [(0x7FFC << 16) | 4],
+                [(0x3FFF << 16) | 4],
                 0x10E9BD8,
                 8,
                 FakeGenerator,
