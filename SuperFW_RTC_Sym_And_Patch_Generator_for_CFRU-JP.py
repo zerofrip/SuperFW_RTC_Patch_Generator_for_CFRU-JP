@@ -300,7 +300,10 @@ def _rtc_0212_compatibility_patch(patchset, generator_module, layout):
     except (KeyError, TypeError, ValueError) as error:
         raise GenerationError("RTC gettimedate target is missing or malformed, too small, or outside the ROM address range") from error
 
-    if address >= 0x1000000:
+    if address & 3:
+        raise GenerationError("RTC gettimedate target is unaligned")
+
+    if address >= 0x1000000 and size < RTC_GETTIMEDATE_0212_SIZE:
         try:
             return _rtc_relocation_patch(
                 patchset, layout, address, size, generator_module,
@@ -311,8 +314,6 @@ def _rtc_0212_compatibility_patch(patchset, generator_module, layout):
         except Exception as error:
             raise GenerationError("Could not generate RTC relocation patch: %s" % error) from error
 
-    if address & 3:
-        raise GenerationError("RTC gettimedate target is unaligned")
     try:
         raw_patch = []
         for index in range(0, len(RTC_GETTIMEDATE_0212_HANDLER_WORDS), 8):

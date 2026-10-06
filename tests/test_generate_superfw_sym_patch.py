@@ -298,6 +298,27 @@ class SerializationTests(unittest.TestCase):
         self.assertEqual(tuple(word for _, _, words in copies[:6] for word in words), EXPECTED_0212_HANDLER)
         self.assertEqual(copies[-1], (4, 0x10E9BD8, (0x47184B00, 0x08EE3801)))
 
+    def test_default_high_rom_replaces_full_0212_handler_in_place(self):
+        address = 0x010F03C8
+        patch, counts = runner.serialize_patch(
+            {
+                "game-code": "BPRJ", "game-version": 1,
+                "targets": {"rtc": {"gettimedate_fn": {"addr": hex(address), "size": 188}}},
+                "romsize": 0x2000000,
+            },
+            generator_module=HighTailGenerator,
+        )
+
+        self.assertEqual(counts["rtc"], 57)
+        self.assertEqual(struct.unpack_from("<I", patch, 16 + 6)[0], HIGH_TAIL_LAYOUT_WORD)
+        rtc_words = struct.unpack_from("<57I", patch, 288 + 4 * 3)
+        copies = copy_operations(rtc_words, 4)
+        self.assertEqual([len(words) for _, _, words in copies], [8, 8, 8, 8, 8, 7])
+        self.assertEqual([operation for operation, _, _ in copies], [4] * 6)
+        self.assertEqual([target for _, target, _ in copies], [address + index * 32 for index in range(6)])
+        self.assertEqual(tuple(word for _, _, words in copies for word in words), EXPECTED_0212_HANDLER)
+        self.assertNotIn(0xEE3800, [target for _, target, _ in copies])
+
     def test_default_profile_rejects_short_target_and_unknown_profile(self):
         for address, size in (
             ("0x1234", 187), ("0x10e9bd8", 7),
