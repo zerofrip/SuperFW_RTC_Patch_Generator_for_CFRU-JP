@@ -59,6 +59,27 @@ class HighRomGenerator(FakeGenerator):
     GamePatch = HighRomGamePatch
 
 
+EXPECTED_0212_HANDLER = (
+    0x4778B530, 0xE10F3000, 0xE321F09B, 0xE20D1007, 0xE04DD181, 0x328EE001, 0x328DDD16, 0xE1A0500E,
+    0xE121F003, 0xE28F2001, 0xE12FFF12, 0x213C1C04, 0xF82EF000, 0x213C71A0, 0xF82AF000, 0x21187160,
+    0xF826F000, 0x1C287120, 0x21073006, 0x70E1DF06, 0x71E22240, 0x300120FF, 0x31B921B4, 0x0783A211,
+    0x3101D101, 0x1A6D320C, 0x186DD2F5, 0xF814F000, 0x20007020, 0x30015C11, 0xD2FB1A6D, 0xF000186D,
+    0x7060F80B, 0x30011C28, 0xF806F000, 0xBD3070A0, 0xDF061C28, 0x1C081C05, 0xDF06210A, 0x43080100,
+    0x46C04770, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F, 0x1F1E1F1E,
+)
+
+
+def copy_operations(words, start):
+    copies = []
+    cursor = start
+    while cursor < len(words):
+        operation = words[cursor]
+        word_count = ((operation >> 25) & 7) + 1
+        copies.append((operation >> 28, operation & 0x1FFFFFF, words[cursor + 1:cursor + 1 + word_count]))
+        cursor += word_count + 1
+    return copies
+
+
 def result(targets=None):
     return {
         "result": "ok",
@@ -153,7 +174,7 @@ class PipelineTests(unittest.TestCase):
             "080000dc g 000000bc SiiRtcGetDateTime",
         ])
 
-        patch, counts = runner.build_patch(bytes(rom), symbols)
+        patch, counts = runner.build_patch(bytes(rom), symbols, profile="legacy-v0.19-v0.21")
 
         self.assertEqual(len(patch), 800)
         self.assertEqual(counts["rtc"], 14)
@@ -199,7 +220,8 @@ class PipelineTests(unittest.TestCase):
             self.assertIn(hashlib.sha256(rom).hexdigest(), stdout.getvalue())
             self.assertIn(hashlib.sha256(sym_text.encode("utf-8")).hexdigest(), stdout.getvalue())
             self.assertIn("PATCH SHA-256:", stdout.getvalue())
-            self.assertIn("waitcnt=0 save=0 save_type=0 irq=0 rtc=14 layout=0", stdout.getvalue())
+            self.assertIn("RTC profile: 0.21.2", stdout.getvalue())
+            self.assertIn("waitcnt=0 save=0 save_type=0 irq=0 rtc=57 layout=0", stdout.getvalue())
 
             patch_path.unlink()
             sym_path.write_text("", encoding="utf-8")
@@ -212,6 +234,103 @@ class PipelineTests(unittest.TestCase):
 
 
 class SerializationTests(unittest.TestCase):
+    def test_default_low_rom_writes_exact_0212_handler_in_chunked_copies(self):
+        patch, counts = runner.serialize_patch(
+            {
+                "game-code": "BPRJ", "game-version": 1,
+                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x1234", "size": 188}}},
+                "romsize": 0x200,
+            },
+            generator_module=FakeGenerator,
+        )
+
+        self.assertEqual(runner.RTC_GETTIMEDATE_0212_HANDLER_WORDS, EXPECTED_0212_HANDLER)
+        self.assertEqual(len(EXPECTED_0212_HANDLER) * 4, 188)
+        self.assertEqual(counts["rtc"], 57)
+        rtc_words = struct.unpack_from("<57I", patch, 288 + 4 * 3)
+        copies = copy_operations(rtc_words, 4)
+        self.assertEqual([len(words) for _, _, words in copies], [8, 8, 8, 8, 8, 7])
+        self.assertEqual([operation for operation, _, _ in copies], [4] * 6)
+        self.assertEqual([address for _, address, _ in copies], [0x1234 + index * 32 for index in range(6)])
+        self.assertEqual(tuple(word for _, _, words in copies for word in words), EXPECTED_0212_HANDLER)
+        self.assertEqual(copies[-1][2], EXPECTED_0212_HANDLER[40:])
+
+    def test_default_high_rom_relocates_exact_0212_handler_and_veneers_entry(self):
+        patch, counts = runner.serialize_patch(
+            {
+                "game-code": "BPRJ", "game-version": 1,
+                "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}}},
+                "romsize": 0x2000000,
+            },
+            generator_module=HighRomGenerator,
+        )
+
+        self.assertEqual(counts["rtc"], 60)
+        self.assertEqual(struct.unpack_from("<I", patch, 16 + 6)[0], (0x36B0 << 16) | 0x4DE)
+        rtc_words = struct.unpack_from("<60I", patch, 288 + 4 * 3)
+        copies = copy_operations(rtc_words, 4)
+        self.assertEqual([len(words) for _, _, words in copies], [8, 8, 8, 8, 8, 7, 2])
+        self.assertEqual([operation for operation, _, _ in copies], [4] * 7)
+        self.assertEqual([address for _, address, _ in copies[:6]], [0xEE3800 + index * 32 for index in range(6)])
+        self.assertEqual(tuple(word for _, _, words in copies[:6] for word in words), EXPECTED_0212_HANDLER)
+        self.assertEqual(copies[-1], (4, 0x10E9BD8, (0x47184B00, 0x08EE3801)))
+
+    def test_default_profile_rejects_short_target_and_unknown_profile(self):
+        for address, size in (
+            ("0x1234", 187), ("0x10e9bd8", 7),
+            ("0x1235", 188), ("0x1ffff80", 188), ("0x1ffffffc", 8),
+        ):
+            with self.subTest(address=address, size=size):
+                with self.assertRaises(runner.GenerationError):
+                    runner.serialize_patch(
+                        {
+                            "game-code": "BPRJ", "game-version": 1,
+                            "targets": {"rtc": {"gettimedate_fn": {"addr": address, "size": size}}},
+                            "romsize": 0x2000000,
+                        },
+                        generator_module=HighRomGenerator,
+                    )
+        with self.assertRaisesRegex(runner.GenerationError, "Unknown RTC profile"):
+            runner.serialize_patch({}, generator_module=FakeGenerator, profile="unsupported")
+        with self.assertRaisesRegex(runner.GenerationError, "Unknown RTC profile"):
+            runner.build_patch(b"", "", profile="unsupported")
+        with contextlib.redirect_stderr(io.StringIO()):
+            with self.assertRaises(SystemExit) as error:
+                runner.main([
+                    "--rom", "rom.gba", "--sym", "rom.sym", "--output", "rom.patch",
+                    "--profile", "unsupported",
+                ])
+        self.assertEqual(error.exception.code, 2)
+
+    def test_default_high_rom_rejects_overlap_and_relocation_above_16_mib(self):
+        overlapping = {
+            "game-code": "BPRJ", "game-version": 1,
+            "targets": {"rtc": {
+                "gettimedate_fn": {"addr": "0x10e9bd8", "size": 8},
+                "probe_fn": {"addr": "0xee3800", "size": 4},
+            }},
+            "romsize": 0x2000000,
+        }
+        with self.assertRaisesRegex(runner.GenerationError, "overlaps"):
+            runner.serialize_patch(overlapping, generator_module=HighRomGenerator)
+
+        class Above16MiBGamePatch(HighRomGamePatch):
+            def layout_patches(self):
+                return [(0x4000 << 16) | 4]
+
+        class Above16MiBGenerator(FakeGenerator):
+            GamePatch = Above16MiBGamePatch
+
+        with self.assertRaisesRegex(runner.GenerationError, "below 16 MiB"):
+            runner.serialize_patch(
+                {
+                    "game-code": "BPRJ", "game-version": 1,
+                    "targets": {"rtc": {"gettimedate_fn": {"addr": "0x10e9bd8", "size": 8}}},
+                    "romsize": 0x2000000,
+                },
+                generator_module=Above16MiBGenerator,
+            )
+
     def test_serialization_matches_800_byte_header_programs_and_payload(self):
         patch, counts = runner.serialize_patch(
             {
@@ -220,6 +339,7 @@ class SerializationTests(unittest.TestCase):
                 "romsize": 0x200,
             },
             generator_module=FakeGenerator,
+            profile="legacy-v0.19-v0.21",
         )
         self.assertEqual(len(patch), 800)
         self.assertEqual(patch[:16], b"SUPERFWPATCHV01\x00")
@@ -247,6 +367,7 @@ class SerializationTests(unittest.TestCase):
                 "romsize": 0x2000000,
             },
             generator_module=HighRomGenerator,
+            profile="legacy-v0.19-v0.21",
         )
 
         self.assertEqual(len(patch), 800)
@@ -290,6 +411,7 @@ class SerializationTests(unittest.TestCase):
                             "romsize": 0x2000000,
                         },
                         generator_module=HighRomGenerator,
+                        profile="legacy-v0.19-v0.21",
                     )
 
     def test_high_rom_relocation_rejects_invalid_layout_and_target(self):
@@ -318,6 +440,7 @@ class SerializationTests(unittest.TestCase):
                             "romsize": 0x2000000,
                         },
                         generator_module=InvalidLayoutGenerator,
+                        profile="legacy-v0.19-v0.21",
                     )
 
     def test_high_rom_relocation_rejects_overlap_and_oversized_payload(self):
@@ -330,7 +453,7 @@ class SerializationTests(unittest.TestCase):
             "romsize": 0x2000000,
         }
         with self.assertRaisesRegex(runner.GenerationError, "overlaps"):
-            runner.serialize_patch(overlapping, generator_module=HighRomGenerator)
+            runner.serialize_patch(overlapping, generator_module=HighRomGenerator, profile="legacy-v0.19-v0.21")
 
         class LargePayloadGamePatch(HighRomGamePatch):
             def waitcnt_patches(self):
@@ -347,6 +470,7 @@ class SerializationTests(unittest.TestCase):
                     "romsize": 0x2000000,
                 },
                 generator_module=LargePayloadGenerator,
+                profile="legacy-v0.19-v0.21",
             )
 
     def test_missing_malformed_or_too_small_gettimedate_target_fails_closed(self):
@@ -361,6 +485,7 @@ class SerializationTests(unittest.TestCase):
                     runner.serialize_patch(
                         {"game-code": "BPRJ", "game-version": 1, "targets": invalid_targets, "romsize": 0x200},
                         generator_module=FakeGenerator,
+                        profile="legacy-v0.19-v0.21",
                     )
 
     def test_gettimedate_tail_address_end_overflow_fails_closed(self):
@@ -372,6 +497,7 @@ class SerializationTests(unittest.TestCase):
                     "romsize": 0x200,
                 },
                 generator_module=FakeGenerator,
+                profile="legacy-v0.19-v0.21",
             )
 
     def test_invalid_generator_payload_fails_closed(self):
@@ -386,6 +512,7 @@ class SerializationTests(unittest.TestCase):
                     "romsize": 0x200,
                 },
                 generator_module=InvalidGenerator,
+                profile="legacy-v0.19-v0.21",
             )
 
     def test_atomic_output_refuses_overwrite_and_force_replaces(self):

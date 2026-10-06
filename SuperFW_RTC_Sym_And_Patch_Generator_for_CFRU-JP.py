@@ -11,22 +11,23 @@ import sys
 import tempfile
 
 PTYPES = ("waitcnt", "irq", "swi1", "save", "layout", "rtc", "symmap")
+RTC_PROFILES = ("0.21.2", "legacy-v0.19-v0.21")
 MAGIC = b"SUPERFWPATCHV01\x00"
 MAX_ROM_SIZE = 32 * 1024 * 1024
-RTC_GETTIMEDATE_DAY_OFFSET = 0x68
-RTC_GETTIMEDATE_DAY_INSTRUCTION = 0x1C68
-RTC_GETTIMEDATE_HOOK_OFFSET = 0x3A
-RTC_GETTIMEDATE_HOOK_WORD = 0xF831F000
-RTC_GETTIMEDATE_TAIL_OFFSET = 0xA0
-RTC_GETTIMEDATE_TAIL_WORDS = (
+RTC_GETTIMEDATE_LEGACY_DAY_OFFSET = 0x68
+RTC_GETTIMEDATE_LEGACY_DAY_INSTRUCTION = 0x1C68
+RTC_GETTIMEDATE_LEGACY_HOOK_OFFSET = 0x3A
+RTC_GETTIMEDATE_LEGACY_HOOK_WORD = 0xF831F000
+RTC_GETTIMEDATE_LEGACY_TAIL_OFFSET = 0xA0
+RTC_GETTIMEDATE_LEGACY_TAIL_WORDS = (
     0x30061C28,  # mov r0,r5; add r0,#6
     0xDF062107,  # mov r1,#7; swi 6
     0x224070E1,  # strb r1,[r4,#3]; mov r2,#0x40
     0x200071E2,  # strb r2,[r4,#7]; mov r0,#0
     0x477021B4,  # mov r1,#180; bx lr
 )
-RTC_GETTIMEDATE_MIN_SIZE = RTC_GETTIMEDATE_TAIL_OFFSET + len(RTC_GETTIMEDATE_TAIL_WORDS) * 4
-RTC_GETTIMEDATE_HANDLER_WORDS = (
+RTC_GETTIMEDATE_LEGACY_MIN_SIZE = RTC_GETTIMEDATE_LEGACY_TAIL_OFFSET + len(RTC_GETTIMEDATE_LEGACY_TAIL_WORDS) * 4
+RTC_GETTIMEDATE_LEGACY_HANDLER_WORDS = (
     0x1C04B5F0, 0x46C04778, 0xE10F3000, 0xE321F09B, 0xE08EE18D, 0xE1A0500E, 0xE121F003, 0xE28F2001,
     0xE12FFF12, 0xF000213C, 0x71A0F838, 0xF000213C, 0x7160F834, 0xF0002118, 0x7120F830, 0x30061C28,
     0xDF062107, 0x204070E1, 0x260071E0, 0x31B921B4, 0x07801C30, 0x3101D100, 0xD302428D, 0x36011A6D,
@@ -35,10 +36,24 @@ RTC_GETTIMEDATE_HANDLER_WORDS = (
     0x210A1C08, 0x0100DF06, 0x47704308, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F,
     0x1F1E1F1E
 )
+RTC_GETTIMEDATE_0212_HANDLER_WORDS = (
+    0x4778B530, 0xE10F3000, 0xE321F09B, 0xE20D1007, 0xE04DD181, 0x328EE001, 0x328DDD16, 0xE1A0500E,
+    0xE121F003, 0xE28F2001, 0xE12FFF12, 0x213C1C04, 0xF82EF000, 0x213C71A0, 0xF82AF000, 0x21187160,
+    0xF826F000, 0x1C287120, 0x21073006, 0x70E1DF06, 0x71E22240, 0x300120FF, 0x31B921B4, 0x0783A211,
+    0x3101D101, 0x1A6D320C, 0x186DD2F5, 0xF814F000, 0x20007020, 0x30015C11, 0xD2FB1A6D, 0xF000186D,
+    0x7060F80B, 0x30011C28, 0xF806F000, 0xBD3070A0, 0xDF061C28, 0x1C081C05, 0xDF06210A, 0x43080100,
+    0x46C04770, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F, 0x1F1E1F1E
+)
+RTC_GETTIMEDATE_0212_SIZE = len(RTC_GETTIMEDATE_0212_HANDLER_WORDS) * 4
 
 
 class GenerationError(Exception):
     pass
+
+
+def _validate_profile(profile):
+    if profile not in RTC_PROFILES:
+        raise GenerationError("Unknown RTC profile: %s" % profile)
 
 
 def _get_data(result, ptype):
@@ -120,8 +135,8 @@ def analyze_rom(rom, sym_text, analyzers=None):
     return merge_results(results)
 
 
-def _rtc_relocation_patch(patchset, layout, address, size, generator_module):
-    if address & 3 or size < RTC_GETTIMEDATE_MIN_SIZE or address + size > 0x2000000:
+def _rtc_relocation_patch(patchset, layout, address, size, generator_module, handler_words, minimum_size):
+    if address & 3 or size < minimum_size or address + size > 0x2000000:
         raise GenerationError("RTC gettimedate target is unaligned or outside the ROM address range")
     if len(layout) != 1 or isinstance(layout[0], bool) or not isinstance(layout[0], int) or not 0 <= layout[0] <= 0xFFFFFFFF:
         raise GenerationError("RTC relocation requires one valid ROM layout word")
@@ -135,7 +150,7 @@ def _rtc_relocation_patch(patchset, layout, address, size, generator_module):
         raise GenerationError("RTC relocation layout hole is malformed or too small")
 
     relocated = hole_end - 0x400
-    handler_end = relocated + len(RTC_GETTIMEDATE_HANDLER_WORDS) * 4
+    handler_end = relocated + len(handler_words) * 4
     if relocated >= 0x1000000 or handler_end > 0x1000000:
         raise GenerationError("RTC relocation address must remain below 16 MiB")
 
@@ -155,8 +170,8 @@ def _rtc_relocation_patch(patchset, layout, address, size, generator_module):
 
     layout[0] = (layout_word & 0xFFFF0000) | (hole_size_units - 1)
     raw_patch = []
-    for index in range(0, len(RTC_GETTIMEDATE_HANDLER_WORDS), 8):
-        words = list(RTC_GETTIMEDATE_HANDLER_WORDS[index:index + 8])
+    for index in range(0, len(handler_words), 8):
+        words = list(handler_words[index:index + 8])
         raw_patch += generator_module.gen_cpywords(relocated + index * 4, words)
     raw_patch += generator_module.gen_cpywords(
         address, [0x47184B00, 0x08000000 + relocated | 1]
@@ -176,9 +191,9 @@ def _rtc_compatibility_patch(patchset, generator_module, layout):
         address = int(address, 16)
         if isinstance(size, bool) or not isinstance(size, int):
             raise ValueError("invalid target size")
-        if size < RTC_GETTIMEDATE_MIN_SIZE:
+        if size < RTC_GETTIMEDATE_LEGACY_MIN_SIZE:
             raise ValueError("target is too small")
-        if address < 0 or address + RTC_GETTIMEDATE_MIN_SIZE - 1 > 0x1FFFFFF:
+        if address < 0 or address + RTC_GETTIMEDATE_LEGACY_MIN_SIZE - 1 > 0x1FFFFFF:
             raise ValueError("address is outside the ROM address range")
         high_rom = address >= 0x1000000
     except (KeyError, TypeError, ValueError) as error:
@@ -188,7 +203,10 @@ def _rtc_compatibility_patch(patchset, generator_module, layout):
 
     if high_rom:
         try:
-            return _rtc_relocation_patch(patchset, layout, address, size, generator_module)
+            return _rtc_relocation_patch(
+                patchset, layout, address, size, generator_module,
+                RTC_GETTIMEDATE_LEGACY_HANDLER_WORDS, RTC_GETTIMEDATE_LEGACY_MIN_SIZE,
+            )
         except GenerationError:
             raise
         except Exception as error:
@@ -199,23 +217,62 @@ def _rtc_compatibility_patch(patchset, generator_module, layout):
         # instruction bytes, including the fixed BL encoding used by these builds.
         return (
             generator_module.gen_cpyhalfword(
-                address + RTC_GETTIMEDATE_DAY_OFFSET,
-                RTC_GETTIMEDATE_DAY_INSTRUCTION,
+                address + RTC_GETTIMEDATE_LEGACY_DAY_OFFSET,
+                RTC_GETTIMEDATE_LEGACY_DAY_INSTRUCTION,
             )
             + generator_module.gen_cpywords(
-                address + RTC_GETTIMEDATE_HOOK_OFFSET,
-                [RTC_GETTIMEDATE_HOOK_WORD],
+                address + RTC_GETTIMEDATE_LEGACY_HOOK_OFFSET,
+                [RTC_GETTIMEDATE_LEGACY_HOOK_WORD],
             )
             + generator_module.gen_cpywords(
-                address + RTC_GETTIMEDATE_TAIL_OFFSET,
-                list(RTC_GETTIMEDATE_TAIL_WORDS),
+                address + RTC_GETTIMEDATE_LEGACY_TAIL_OFFSET,
+                list(RTC_GETTIMEDATE_LEGACY_TAIL_WORDS),
             )
         )
     except Exception as error:
         raise GenerationError("Could not generate RTC compatibility patch: %s" % error) from error
 
 
-def serialize_patch(patchset, generator_module=None):
+def _rtc_0212_compatibility_patch(patchset, generator_module, layout):
+    try:
+        target = patchset["targets"]["rtc"]["gettimedate_fn"]
+        if not isinstance(target, dict) or not isinstance(target.get("addr"), str):
+            raise ValueError("invalid target")
+        address = int(target["addr"], 16)
+        size = target["size"]
+        if isinstance(size, bool) or not isinstance(size, int):
+            raise ValueError("invalid target size")
+        minimum_size = 8 if address >= 0x1000000 else RTC_GETTIMEDATE_0212_SIZE
+        if address < 0 or size < minimum_size or address + size > 0x2000000:
+            raise ValueError("target is too small or outside the ROM address range")
+    except (KeyError, TypeError, ValueError) as error:
+        raise GenerationError("RTC gettimedate target is missing or malformed, too small, or outside the ROM address range") from error
+
+    if address >= 0x1000000:
+        try:
+            return _rtc_relocation_patch(
+                patchset, layout, address, size, generator_module,
+                RTC_GETTIMEDATE_0212_HANDLER_WORDS, 8,
+            )
+        except GenerationError:
+            raise
+        except Exception as error:
+            raise GenerationError("Could not generate RTC relocation patch: %s" % error) from error
+
+    if address & 3:
+        raise GenerationError("RTC gettimedate target is unaligned")
+    try:
+        raw_patch = []
+        for index in range(0, len(RTC_GETTIMEDATE_0212_HANDLER_WORDS), 8):
+            words = list(RTC_GETTIMEDATE_0212_HANDLER_WORDS[index:index + 8])
+            raw_patch += generator_module.gen_cpywords(address + index * 4, words)
+        return raw_patch
+    except Exception as error:
+        raise GenerationError("Could not generate RTC compatibility patch: %s" % error) from error
+
+
+def serialize_patch(patchset, generator_module=None, profile="0.21.2"):
+    _validate_profile(profile)
     if generator_module is None:
         try:
             generator_module = importlib.import_module("patchtool.generator")
@@ -234,7 +291,11 @@ def serialize_patch(patchset, generator_module=None):
         programs = generator_module.PROGRAMS[:4]
     except Exception as error:
         raise GenerationError("GamePatch failed: %s" % error) from error
-    rtc += _rtc_compatibility_patch(patchset, generator_module, layout)
+    compatibility_patch = (
+        _rtc_compatibility_patch if profile == "legacy-v0.19-v0.21"
+        else _rtc_0212_compatibility_patch
+    )
+    rtc += compatibility_patch(patchset, generator_module, layout)
 
     counts = (len(waitcnt), len(save), save_type, len(irq), len(rtc))
     if any(not isinstance(value, int) or value < 0 or value > 255 for value in counts):
@@ -265,9 +326,10 @@ def serialize_patch(patchset, generator_module=None):
     }
 
 
-def build_patch(rom, sym_text, analyzers=None, generator_module=None):
+def build_patch(rom, sym_text, analyzers=None, generator_module=None, profile="0.21.2"):
+    _validate_profile(profile)
     patchset = analyze_rom(rom, sym_text, analyzers=analyzers)
-    return serialize_patch(patchset, generator_module=generator_module)
+    return serialize_patch(patchset, generator_module=generator_module, profile=profile)
 
 
 def write_atomic(path, data, force=False):
@@ -320,12 +382,16 @@ def main(argv=None):
     parser.add_argument("--rom", required=True, help="input .gba (read-only)")
     parser.add_argument("--sym", required=True, help="matching generated .sym file")
     parser.add_argument("--output", required=True, help="output .patch file")
+    parser.add_argument(
+        "--profile", choices=RTC_PROFILES, default="0.21.2",
+        help="RTC compatibility profile (not recorded in .patch; default: 0.21.2)",
+    )
     parser.add_argument("--force", action="store_true", help="replace an existing output patch")
     args = parser.parse_args(argv)
 
     try:
         rom, sym_text = read_inputs(args.rom, args.sym)
-        patch, counts = build_patch(rom, sym_text)
+        patch, counts = build_patch(rom, sym_text, profile=args.profile)
         write_atomic(args.output, patch, force=args.force)
     except Exception as error:
         print("ERROR: %s" % error, file=sys.stderr)
@@ -334,6 +400,7 @@ def main(argv=None):
     print("ROM SHA-256: %s" % hashlib.sha256(rom).hexdigest())
     print("SYM SHA-256: %s" % hashlib.sha256(sym_text.encode("utf-8")).hexdigest())
     print("PATCH SHA-256: %s" % hashlib.sha256(patch).hexdigest())
+    print("RTC profile: %s" % args.profile)
     print("Counts: waitcnt={waitcnt} save={save} save_type={save_type} irq={irq} rtc={rtc} layout={layout}".format(**counts))
     return 0
 
