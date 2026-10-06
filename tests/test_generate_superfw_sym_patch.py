@@ -250,9 +250,9 @@ class SerializationTests(unittest.TestCase):
         )
 
         self.assertEqual(len(patch), 800)
-        self.assertEqual(struct.unpack_from("<BBBBBxIxxxxxx", patch, 16), (1, 1, 2, 1, 58, (0x36B0 << 16) | 0x4DE))
+        self.assertEqual(struct.unpack_from("<BBBBBxIxxxxxx", patch, 16), (1, 1, 2, 1, 63, (0x36B0 << 16) | 0x4DE))
         rtc_offset = 288 + 4 * 3
-        rtc_words = struct.unpack_from("<58I", patch, rtc_offset)
+        rtc_words = struct.unpack_from("<63I", patch, rtc_offset)
         self.assertEqual(rtc_words[:4], tuple(FakeGamePatch("BPRJ", 1, {}, 0).rtc_patches()))
 
         copies = []
@@ -262,21 +262,22 @@ class SerializationTests(unittest.TestCase):
             word_count = ((operation >> 25) & 7) + 1
             copies.append((operation >> 28, operation & 0x1FFFFFF, rtc_words[cursor + 1:cursor + 1 + word_count]))
             cursor += word_count + 1
-        self.assertEqual([len(words) for _, _, words in copies], [8, 8, 8, 8, 8, 5, 2])
-        self.assertEqual([address for _, address, _ in copies[:6]], [0xEE3800 + index * 0x20 for index in range(6)])
+        self.assertEqual([len(words) for _, _, words in copies], [8, 8, 8, 8, 8, 8, 1, 2])
+        self.assertEqual([address for _, address, _ in copies[:7]], [0xEE3800 + index * 0x20 for index in range(7)])
         self.assertTrue(all(operation == 4 for operation, _, _ in copies))
         expected_handler = (
-            0x4778B530, 0xE10F3000, 0xE321F09B, 0xE08EE18D, 0xE1A0500E, 0xE121F003, 0xE28F2001, 0xE12FFF12,
-            0x213C1C04, 0xF827F000, 0x213C71A0, 0xF823F000, 0x21187160, 0xF81FF000, 0xF0007120, 0x31B9F831,
-            0x0783A211, 0x3101D101, 0x1A6D320C, 0x186DD2F6, 0xF815F000, 0x20007020, 0x30015C11, 0xD2FB1A6D,
-            0xF000186D, 0x7060F80C, 0xF0001C68, 0x70A0F808, 0xBC01BC30, 0x1C284700, 0x1C05DF06, 0x210A1C08,
-            0x0100DF06, 0x47704308, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F, 0x1F1E1F1E,
-            0x30061C28, 0xDF062107, 0x224070E1, 0x200071E2, 0x477021B4,
+            0x1C04B5F0, 0x46C04778, 0xE10F3000, 0xE321F09B, 0xE08EE18D, 0xE1A0500E, 0xE121F003, 0xE28F2001,
+            0xE12FFF12, 0xF000213C, 0x71A0F838, 0xF000213C, 0x7160F834, 0xF0002118, 0x7120F830, 0x30061C28,
+            0xDF062107, 0x204070E1, 0x260071E0, 0x31B921B4, 0x07801C30, 0x3101D100, 0xD302428D, 0x36011A6D,
+            0xA712E7F4, 0x07801C30, 0x370CD100, 0xF0001C30, 0x7020F818, 0x5DB92600, 0xD302428D, 0x36011A6D,
+            0x3601E7F9, 0xF0001C30, 0x7060F80C, 0x1C283501, 0xF807F000, 0x200170A0, 0x1C28BDF0, 0x1C05DF06,
+            0x210A1C08, 0x0100DF06, 0x47704308, 0x1E1F1C1F, 0x1F1F1E1F, 0x1F1E1F1E, 0x1E1F1D1F, 0x1F1F1E1F,
+            0x1F1E1F1E
         )
-        self.assertEqual(tuple(word for _, _, words in copies[:6] for word in words), expected_handler)
-        self.assertEqual(len(expected_handler), 45)
+        self.assertEqual(tuple(word for _, _, words in copies[:7] for word in words), expected_handler)
+        self.assertEqual(len(expected_handler), 49)
         self.assertEqual(copies[-1], (4, 0x10E9BD8, (0x47184B00, 0x08EE3801)))
-        self.assertEqual(counts["rtc"], 58)
+        self.assertEqual(counts["rtc"], 63)
 
     def test_high_rom_requires_full_original_gettimedate_span(self):
         for size in (8, 0xB3):
